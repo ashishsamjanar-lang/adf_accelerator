@@ -1,0 +1,174 @@
+{
+  "name": "ehr_clarity_bronze_load",
+  "pattern": "master_child",
+  "projectId": "proj-a",
+  "templateId": "metadata_driven_load",
+  "sourceType": "sql_server",
+  "sourceObject": "dbo.PATIENT",
+  "targetType": "azure_data_lake_storage_gen2",
+  "targetPath": "/bronze/epic/clarity/",
+  "sourcePartitionOption": "None",
+  "sourceIsolationLevel": "",
+  "queryTimeout": "02:00:00",
+  "sinkFileFormat": "Parquet",
+  "copyBehavior": "PreserveHierarchy",
+  "writeBehavior": "Insert",
+  "upsertKeyColumns": "",
+  "sourceObjectMode": "form",
+  "sourceObjects": [
+    {
+      "object": "dbo.PATIENT",
+      "watermarkColumn": "UPDATE_DATE"
+    },
+    {
+      "object": "dbo.PAT_ENC",
+      "watermarkColumn": "CONTACT_DATE"
+    },
+    {
+      "object": "dbo.CLARITY_SER",
+      "loadingBehavior": "FullLoad"
+    }
+  ],
+  "sourceLinkedService": {
+    "name": "LS_sql_server_source",
+    "connectorType": "sql_server",
+    "authType": "sql_authentication",
+    "integrationRuntime": "AutoResolveIntegrationRuntime",
+    "keyVaultLinkedService": "LS_azure_key_vault",
+    "fields": {
+      "server": "clarity-sql01.stmarys.local",
+      "database": "Clarity",
+      "userName": "svc_adf_clarity",
+      "password": "clarity-sql-password"
+    },
+    "parameterize": []
+  },
+  "targetLinkedService": {
+    "name": "LS_azure_data_lake_storage_gen2_target",
+    "connectorType": "azure_data_lake_storage_gen2",
+    "authType": "account_key",
+    "integrationRuntime": "AutoResolveIntegrationRuntime",
+    "keyVaultLinkedService": "LS_azure_key_vault",
+    "fields": {
+      "accountName": "stmaryshealthlake",
+      "url": "https://stmaryshealthlake.dfs.core.windows.net",
+      "accountKey": "healthlake-account-key"
+    },
+    "parameterize": []
+  },
+  "sourceDataset": {
+    "name": "",
+    "linkedServiceName": "LS_sql_server_source",
+    "schema": "",
+    "table": "",
+    "folderPath": "",
+    "fileName": "",
+    "parameterized": true,
+    "format": {
+      "columnDelimiter": ",",
+      "rowDelimiter": "\n",
+      "quoteChar": "\"",
+      "escapeChar": "\\",
+      "firstRowAsHeader": true,
+      "encoding": "utf-8",
+      "compression": "none"
+    }
+  },
+  "targetDataset": {
+    "name": "",
+    "linkedServiceName": "LS_azure_data_lake_storage_gen2_target",
+    "schema": "",
+    "table": "",
+    "folderPath": "",
+    "fileName": "",
+    "parameterized": true,
+    "format": {
+      "columnDelimiter": ",",
+      "rowDelimiter": "\n",
+      "quoteChar": "\"",
+      "escapeChar": "\\",
+      "firstRowAsHeader": true,
+      "encoding": "utf-8",
+      "compression": "none"
+    }
+  },
+  "watermarkEnabled": true,
+  "watermarkType": "single",
+  "watermarkColumns": [
+    {
+      "name": "UPDATE_DATE",
+      "type": "datetime",
+      "order": 1
+    }
+  ],
+  "watermarkTable": "control.watermarks",
+  "watermarkInitialValue": "1900-01-01",
+  "connectionControlEnabled": false,
+  "connectionControlTable": "control.adf_connection_control",
+  "loadTypeMode": "incremental",
+  "initialLoad": false,
+  "fullLoad": false,
+  "truncateTarget": false,
+  "masterChildPattern": true,
+  "isSequential": false,
+  "batchCount": 20,
+  "enableCopyLog": true,
+  "logLevel": "Info",
+  "enableAzureMonitor": true,
+  "customLogColumns": [
+    {
+      "name": "PipelineRunId",
+      "value": "@pipeline().RunId"
+    },
+    {
+      "name": "ExecutionDate",
+      "value": "@utcnow()"
+    }
+  ],
+  "parallelCopies": 10,
+  "enableStaging": false,
+  "stagingLinkedService": "",
+  "stagingPath": "staging/",
+  "stagingEnableCompression": false,
+  "retryCount": 3,
+  "retryIntervalInSeconds": 30,
+  "redirectIncompatibleRows": false,
+  "rejectsLinkedService": "",
+  "rejectsPath": "rejects/",
+  "chunkingEnabled": false,
+  "chunkSizeRows": 1000000,
+  "maxParallelChunks": 4,
+  "rowCountValidationEnabled": false,
+  "dataQualityRules": [
+    {
+      "name": "patient_mrn_not_null",
+      "column": "PAT_MRN_ID",
+      "rule": "IS_NOT_NULL",
+      "value": "",
+      "enforcement": "block"
+    },
+    {
+      "name": "patient_id_unique",
+      "column": "PAT_ID",
+      "rule": "UNIQUE",
+      "value": "",
+      "enforcement": "warn"
+    }
+  ],
+  "notifyOnSuccess": false,
+  "notifyOnFailure": false,
+  "notificationEmails": [
+    "dataops@stmarys-health.org"
+  ],
+  "triggerEnabled": false,
+  "triggerType": "schedule",
+  "triggerFrequency": "Day",
+  "triggerInterval": 1,
+  "triggerStartTime": "",
+  "triggerTimeZone": "UTC",
+  "triggerFallbackSchedule": true,
+  "customMetadata": [],
+  "medallionLayer": "bronze",
+  "transformations": [],
+  "generateLineage": true
+}

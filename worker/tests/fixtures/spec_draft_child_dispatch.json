@@ -1,0 +1,51 @@
+{
+  "name": "product_hub_orchestrator",
+  "masterPipelineName": "PL_ProductHub_Orchestrator",
+  "childPipelineName": "PL_ProductHub_ObjectRouter",
+  "projectId": "proj-parity-test",
+  "templateId": "metadata_driven_load",
+  "sourceType": "sql_server",
+  "sourceObject": "dbo.product",
+  "targetType": "azure_data_lake_storage_gen2",
+  "targetPath": "/product/",
+  "sourceObjectMode": "form",
+  "sourceObjects": [
+    {
+      "object": "dbo.product",
+      "watermarkColumn": "modified_date"
+    },
+    {
+      "object": "dbo.product_category",
+      "watermarkColumn": "modified_date"
+    }
+  ],
+  "watermarkEnabled": true,
+  "watermarkType": "single",
+  "watermarkColumns": [
+    {
+      "name": "modified_date",
+      "type": "datetime",
+      "order": 1
+    }
+  ],
+  "watermarkTable": "control.watermarks",
+  "watermarkInitialValue": "1900-01-01",
+  "loadTypeMode": "incremental",
+  "masterChildPattern": true,
+  "isSequential": false,
+  "batchCount": 15,
+  "parallelCopies": 10,
+  "enableCopyLog": true,
+  "logLevel": "Info",
+  "sinkFileFormat": "Parquet",
+  "childDispatch": [
+    {
+      "matchValue": "finance",
+      "childPipelineName": "PL_finance_child"
+    },
+    {
+      "matchValue": "hr",
+      "childPipelineName": "PL_hr_child"
+    }
+  ]
+}

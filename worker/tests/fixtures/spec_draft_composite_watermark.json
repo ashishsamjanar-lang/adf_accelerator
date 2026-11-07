@@ -1,0 +1,36 @@
+{
+  "name": "endorsement_composite_delta",
+  "projectId": "proj-parity-test",
+  "templateId": "composite_watermark_load",
+  "sourceType": "sql_server",
+  "sourceObject": "dbo.endorsement",
+  "targetType": "azure_data_lake_storage_gen2",
+  "targetPath": "/endorsement/",
+  "sourceObjectMode": "form",
+  "sourceObjects": [{ "object": "dbo.endorsement", "watermarkColumn": "updated_at" }],
+  "watermarkEnabled": true,
+  "watermarkType": "composite",
+  "watermarkColumns": [
+    { "name": "updated_at", "type": "datetime", "order": 1 },
+    { "name": "endorsement_id", "type": "bigint", "order": 2 }
+  ],
+  "watermarkTable": "control.watermarks",
+  "watermarkInitialValue": "1900-01-01",
+  "watermarkFilterCondition": "status <> 'VOID'",
+  "loadTypeMode": "composite_watermark",
+  "rowCountValidationEnabled": true,
+  "dataQualityRules": [
+    { "name": "endorsement_id_not_null", "column": "endorsement_id", "rule": "NOT NULL" },
+    { "name": "endorsement_id_mostly_set", "column": "endorsement_id", "rule": "IS_NOT_NULL", "enforcement": "block", "maxViolationPct": "2.5" }
+  ],
+  "batchCount": 4,
+  "parallelCopies": 8,
+  "retryCount": 3,
+  "retryIntervalInSeconds": 15,
+  "enableCopyLog": true,
+  "logLevel": "Info",
+  "sinkFileFormat": "Parquet",
+  "writeBehavior": "Upsert",
+  "upsertKeyColumns": "endorsement_id",
+  "customMetadata": [{ "name": "_source_system", "value": "PAS" }]
+}

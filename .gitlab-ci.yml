@@ -1,0 +1,171 @@
+# GitLab CI/CD mirror of .github/workflows/ci.yml + deploy.yml — see
+# docs/DEPLOYMENT_GUIDE.md §4 for the one-time OIDC/variable setup this pipeline
+# needs before `deploy` can run. Targets the same infra/main.bicep (Azure
+# Container Apps) as the GitHub path; switch compute target per
+# docs/DEPLOYMENT_GUIDE.md §6/§7/§8 if you deploy somewhere else.
+#
+# Images are pushed to the GitLab Container Registry ($CI_REGISTRY_IMAGE) —
+# see docs/DEPLOYMENT_GUIDE.md §1 for when ACR is a better fit instead.
+#
+# This has not been run against a real GitLab pipeline or Azure subscription;
+# validate the `deploy:whatif` stage's output before trusting `deploy:apply`.
+
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  REGISTRY_IMAGE: $CI_REGISTRY_IMAGE
+
+# ---------------------------------------------------------------------------
+# test — same checks as .github/workflows/ci.yml's backend-tests/worker-tests/
+# frontend-checks jobs. Split as separate jobs so a frontend failure doesn't
+# block backend feedback (and vice versa).
+# ---------------------------------------------------------------------------
+
+backend-tests:
+  stage: test
+  image: python:3.12-slim
+  script:
+    - cd backend
+    - pip install --no-cache-dir -r requirements-dev.txt
+    - pytest -q
+
+worker-tests:
+  stage: test
+  image: python:3.12-slim
+  script:
+    - cd worker
+    - pip install --no-cache-dir -r requirements-dev.txt
+    - pytest -q
+
+# Mirrors ci.yml's `migrations` job — a real Postgres, only for the
+# migration-drift check (every other backend test runs against in-memory
+# SQLite and needs no external service).
+migrations:
+  stage: test
+  image: python:3.12-slim
+  services:
+    - name: postgres:16
+      alias: postgres
+  variables:
+    POSTGRES_DB: accelerator
+    POSTGRES_USER: accelerator
+    POSTGRES_PASSWORD: ci-only
+    DATABASE_URL: "postgresql+psycopg://accelerator:ci-only@postgres:5432/accelerator"
+  script:
+    - cd backend
+    - pip install --no-cache-dir -r requirements.txt
+    - alembic upgrade head
+    - alembic revision --autogenerate -m "ci_drift_check" --rev-id ci_drift_check
+    - |
+      diff="$(git status --porcelain alembic/versions)"
+      if [ -n "$diff" ]; then
+        echo "alembic autogenerate produced a non-empty migration — a model changed without a matching migration:"
+        cat "alembic/versions/"*ci_drift_check*.py
+        exit 1
+      fi
+
+frontend-checks:
+  stage: test
+  image: node:20
+  script:
+    - cd frontend
+    - npm ci
+    - npm run typecheck
+    - npm run lint
+    - npm run test
+    - npm run build
+
+# Mirrors ci.yml's `generator-parity` job — proves frontend pipeline-codegen.ts
+# and worker codegen.py agree, bridged via worker/tests/test_generator_parity.py.
+generator-parity:
+  stage: test
+  image: python:3.12-slim
+  script:
+    - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    - apt-get install -y nodejs
+    - cd worker && pip install --no-cache-dir -r requirements-dev.txt
+    - cd ../frontend && npm ci
+    - cd ../worker && pytest -q tests/test_generator_parity.py
+
+# ---------------------------------------------------------------------------
+# build — push all three images to the GitLab Container Registry, tagged with
+# the short commit SHA (matches deploy.yml's ${GITHUB_SHA::12} convention).
+# ---------------------------------------------------------------------------
+
+build-and-push:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - export TAG=${CI_COMMIT_SHORT_SHA}
+    - docker build -t "$REGISTRY_IMAGE/backend:$TAG"  ./backend  && docker push "$REGISTRY_IMAGE/backend:$TAG"
+    - docker build -t "$REGISTRY_IMAGE/worker:$TAG"   ./worker   && docker push "$REGISTRY_IMAGE/worker:$TAG"
+    - docker build --target production -t "$REGISTRY_IMAGE/frontend:$TAG" ./frontend && docker push "$REGISTRY_IMAGE/frontend:$TAG"
+    - echo "TAG=$TAG" > build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+
+# ---------------------------------------------------------------------------
+# deploy — OIDC login to Azure (no stored client secret; see
+# docs/DEPLOYMENT_GUIDE.md §4 for the federated-credential setup), what-if
+# then apply infra/main.bicep. Required CI/CD variables per environment:
+# AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+# AZURE_RESOURCE_GROUP, AZURE_KEY_VAULT_NAME. Manual gate — trigger from the
+# GitLab UI (or `rules:`/environment protection) per environment.
+# ---------------------------------------------------------------------------
+
+.azure-login: &azure-login
+  - az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" --federated-token "$AZURE_ID_TOKEN"
+  - az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+
+deploy:whatif:
+  stage: deploy
+  image: mcr.microsoft.com/azure-cli:latest
+  needs: [build-and-push]
+  id_tokens:
+    AZURE_ID_TOKEN:
+      aud: api://AzureADTokenExchange
+  environment: dev
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  script:
+    - *azure-login
+    - >
+      az deployment group create --what-if
+      --resource-group "$AZURE_RESOURCE_GROUP"
+      --template-file ./infra/main.bicep
+      --parameters environment=dev keyVaultName="$AZURE_KEY_VAULT_NAME"
+      containerRegistryServer="$CI_REGISTRY" containerRegistryUsername="$CI_REGISTRY_USER"
+      backendImage="$REGISTRY_IMAGE/backend" workerImage="$REGISTRY_IMAGE/worker"
+      frontendImage="$REGISTRY_IMAGE/frontend" imageTag="$TAG"
+
+deploy:apply:
+  stage: deploy
+  image: mcr.microsoft.com/azure-cli:latest
+  needs: [build-and-push, deploy:whatif]
+  id_tokens:
+    AZURE_ID_TOKEN:
+      aud: api://AzureADTokenExchange
+  environment: dev
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  script:
+    - *azure-login
+    - >
+      az deployment group create
+      --resource-group "$AZURE_RESOURCE_GROUP"
+      --template-file ./infra/main.bicep
+      --parameters environment=dev keyVaultName="$AZURE_KEY_VAULT_NAME"
+      containerRegistryServer="$CI_REGISTRY" containerRegistryUsername="$CI_REGISTRY_USER"
+      backendImage="$REGISTRY_IMAGE/backend" workerImage="$REGISTRY_IMAGE/worker"
+      frontendImage="$REGISTRY_IMAGE/frontend" imageTag="$TAG"

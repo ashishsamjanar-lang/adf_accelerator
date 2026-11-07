@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adf-accelerator-worker"
+version = "0.1.0"
+description = "Stateless worker boundary for generation and deployment"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic-settings>=2.6,<3",
+  "jinja2>=3.1,<4",
+  "sqlalchemy>=2.0,<3",
+  "psycopg[binary]>=3.2,<4",
+  "cryptography>=43,<44",
+  # Real Key Vault credential resolution (§23.12 gap #14). Optional at
+  # runtime — app/gitops/credential_vault.py degrades to env-var resolution
+  # if these aren't importable — but installed by default so KEY_VAULT_NAME
+  # works out of the box in a deployed environment.
+  "azure-identity>=1.17,<2",
+  "azure-keyvault-secrets>=4.8,<5",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

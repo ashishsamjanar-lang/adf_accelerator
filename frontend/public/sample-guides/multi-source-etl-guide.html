@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Enterprise Data Hub — Multi-Source ETL Implementation Guide</title>
+<link rel="stylesheet" href="guide.css" />
+</head>
+<body>
+<div class="doc-shell">
+
+  <div class="doc-masthead">
+    <span class="doc-eyebrow">📦 Sample project 2 · Multi-source enterprise ETL</span>
+    <h1>The Enterprise Data Hub — 8 source systems, one governed ingestion platform</h1>
+    <p class="doc-sub">
+      A worked, enterprise-grade reference implementation consolidating eight heterogeneous source
+      systems — SAP, Salesforce, Workday, Oracle EBS, an on-prem SQL Server order system, vendor SFTP
+      files, a marketing REST API, and a clickstream event feed — into a governed lake and warehouse,
+      built end-to-end with <strong>ADF Forge</strong> and shipped through a real dev → test → prod CI/CD
+      pipeline. Use it as the pattern for any multi-source integration hub.
+    </p>
+    <div class="doc-badges">
+      <span class="pill pill-teal">Built with ADF Forge</span>
+      <span class="pill">8 source systems · tables, files, APIs</span>
+      <span class="pill">Full + Incremental load</span>
+      <span class="pill">Daily · Hourly · Near-real-time</span>
+      <span class="pill">Chunked high-volume loads</span>
+      <span class="pill pill-green">Standard metadata &amp; logging</span>
+      <span class="pill pill-amber">End-to-end CI/CD</span>
+    </div>
+  </div>
+
+  <nav class="doc-toc">
+    <span class="toc-title">On this page</span>
+    <a href="#problem">1. Define the problem</a>
+    <a class="sub" href="#problem-context">Business &amp; technical context</a>
+    <a class="sub" href="#problem-goals">Goals &amp; success criteria</a>
+    <a href="#approach">2. Approach</a>
+    <a class="sub" href="#approach-architecture">Target architecture</a>
+    <a class="sub" href="#approach-forge">Where ADF Forge fits</a>
+    <a class="sub" href="#approach-impact">Impact on development</a>
+    <a class="sub" href="#approach-cicd">CI/CD strategy</a>
+    <a href="#implementation">3. Implementation</a>
+    <a class="sub" href="#impl-inventory">Source-to-target matrix</a>
+    <a class="sub" href="#impl-chunking">High-volume load: chunking &amp; parallelism</a>
+    <a class="sub" href="#impl-folders">Standard folder structure</a>
+    <a class="sub" href="#impl-target-naming">Target table &amp; file naming</a>
+    <a class="sub" href="#impl-layers">Bronze/Silver/Gold layer-specific pipelines</a>
+    <a class="sub" href="#impl-sttm">Bulk-onboarding Silver/Gold with STTM (target design)</a>
+    <a class="sub" href="#impl-metadata">Standard metadata columns</a>
+    <a class="sub" href="#impl-logging">Standard logging</a>
+    <a class="sub" href="#impl-dq">Data quality checks</a>
+    <a class="sub" href="#impl-triggers">Trigger &amp; cadence design</a>
+    <a class="sub" href="#impl-orchestration">Orchestration design</a>
+    <a class="sub" href="#impl-walkthrough">Built with ADF Forge — step by step</a>
+    <a class="sub" href="#impl-cicd">CI/CD pipeline, stage by stage</a>
+    <a class="sub" href="#impl-control-promotion">Promoting onboarded source &amp; control-table metadata</a>
+    <a class="sub" href="#impl-governance">Governance &amp; scaling notes</a>
+  </nav>
+
+  <main class="doc-body">
+
+    <!-- ============================= 1. PROBLEM ============================= -->
+    <section class="doc-section" id="problem">
+      <h2><span class="step-num">1</span>Define the problem</h2>
+      <p class="doc-lede">
+        The same discipline as any onboarding: write down what's broken across the eight silos and what
+        a single, governed ingestion platform needs to guarantee before a single pipeline gets built.
+      </p>
+
+      <h3 id="problem-context">Business &amp; technical context</h3>
+      <p>
+        The enterprise runs its business across eight disconnected systems, each integrated ad hoc by a
+        different team, at a different time, with a different scripting language: SAP S/4HANA (finance
+        &amp; supply chain), Salesforce (CRM), Workday (HR), Oracle E-Business Suite (legacy finance,
+        being sunset over 18 months), an on-prem SQL Server order-management system, a vendor invoice
+        drop over SFTP, a marketing REST API (ad spend), and a website clickstream event feed. Finance,
+        sales ops, and the executive dashboard each need a consolidated view none of these systems can
+        give alone.
+      </p>
+      <div class="grid-cards cols-2">
+        <div class="mini-card">
+          <strong>Pain points today</strong>
+          <span>
+            8 different integration scripts (Python cron jobs, a Talend flow, two manual Excel exports)
+            with no shared logging, no shared naming, no shared metadata — an analyst joining SAP GL data
+            to Salesforce opportunity data has to reverse-engineer two completely different lineage
+            models. Each new source integration takes 4–6 weeks of bespoke engineering.
+          </span>
+        </div>
+        <div class="mini-card">
+          <strong>Scaling &amp; governance exposure</strong>
+          <span>
+            No consistent secret handling — two of the eight scripts have credentials in a config file
+            checked into a private repo. No standard cadence policy, so some feeds are "whenever someone
+            remembers to run the script." Onboarding a 9th source today means onboarding a 9th bespoke
+            pattern, not reusing the other eight.
+          </span>
+        </div>
+      </div>
+
+      <h3 id="problem-goals">Goals &amp; success criteria</h3>
+      <ul>
+        <li><strong>One ingestion pattern, eight source types</strong> — relational tables (SAP, Oracle EBS, SQL Server), SaaS REST APIs (Salesforce, Workday, marketing), SFTP flat files, and a streaming event feed all land through the same governed pipeline family, not eight bespoke ones.</li>
+        <li><strong>Full + incremental parity everywhere</strong> — every object supports an initial full seed and an ongoing incremental load appropriate to its API/connector's change-capture capability.</li>
+        <li><strong>Cadence matched to source reality, not a blanket policy</strong> — SAP/Oracle/SQL Server finance data on a daily close cadence, CRM/HR/marketing on hourly sync, clickstream near-real-time.</li>
+        <li><strong>One metadata and logging contract across all eight sources</strong> — an analyst should not be able to tell, from the curated layer, which of the eight systems a row originated from without reading <code class="inline">_source_system</code>.</li>
+        <li><strong>New source onboarding measured in days, not weeks</strong> — the 9th, 10th, 11th source should reuse the same wizard, the same folder convention, the same control table.</li>
+        <li><strong>Nothing reaches production without validation and review</strong> — same governed Git → PR → CI/CD path for every one of the eight sources, no exceptions for "it's just a small feed."</li>
+      </ul>
+    </section>
+
+    <!-- ============================= 2. APPROACH ============================= -->
+    <section class="doc-section" id="approach">
+      <h2><span class="step-num">2</span>Approach</h2>
+      <p class="doc-lede">
+        A medallion lake fed by a small number of <em>generic, metadata-driven</em> pipelines — one
+        orchestrator per source system reading a shared control table — rather than one pipeline per
+        object multiplied by eight sources. Every artifact is authored through ADF Forge's Build form so
+        eight very different connector types produce structurally identical, governed output.
+      </p>
+
+      <h3 id="approach-architecture">Target architecture</h3>
+      <div class="flow">
+        <div class="flow-node">
+          <span class="fn-eyebrow">8 sources</span>
+          <strong>SAP · Salesforce · Workday · Oracle EBS · SQL Server · SFTP · REST API · Event Hub</strong>
+          <span class="fn-body">Tables, SaaS APIs, flat files, streaming events — different formats and cadences</span>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent">
+          <span class="fn-eyebrow">Landing / Raw</span>
+          <strong>ADLS Gen2 — raw zone</strong>
+          <span class="fn-body">One folder per source/object, native format preserved (JSON, CSV, Avro, Parquet)</span>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent">
+          <span class="fn-eyebrow">Bronze/Silver — curated</span>
+          <strong>ADLS Gen2 curated (Delta)</strong>
+          <span class="fn-body">Conformed schema + the shared 12-column metadata contract, regardless of source</span>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">
+          <span class="fn-eyebrow">Gold / Marts</span>
+          <strong>Azure Synapse dedicated pool + curated file extracts</strong>
+          <span class="fn-body">Cross-source star schema (finance, sales, HR, marketing) + CSV extracts for two downstream apps</span>
+        </div>
+      </div>
+      <p>
+        The key structural decision: curated tables are conformed to one shared schema convention
+        <em>per business entity</em> (e.g. <code class="inline">curated.gl_transaction</code> can be fed by
+        both SAP and Oracle EBS during the 18-month EBS sunset window) — but the raw zone keeps each
+        source's native shape untouched, so a source-specific reconciliation is always possible.
+      </p>
+
+      <h3 id="approach-forge">Where ADF Forge fits</h3>
+      <div class="callout callout-forge">
+        <span class="callout-icon">⚙</span>
+        <div>
+          <strong>ADF Forge is what makes "eight sources, one pattern" actually hold</strong>
+          <p>
+            Without a shared authoring layer, eight teams onboarding eight systems inevitably produce
+            eight different pipeline shapes. ADF Forge's connector registry already knows the field/auth
+            shape of every connector used here (SAP table connector, Salesforce REST/OAuth, Workday REST,
+            Oracle DB, SQL Server via self-hosted IR, SFTP/SSH key, generic REST/API key, Event Hub
+            connection string) — so the same Build wizard, the same Standards policy, and the same
+            Onboarding registry apply uniformly, and ADF itself is the only thing that ever touches these
+            systems at runtime.
+          </p>
+        </div>
+      </div>
+      <ol>
+        <li>
+          <strong>Connections</strong> — eight linked services are saved once in
+          <code class="inline">Delivery → Connections</code>, each tagged Source, with secrets stored as
+          Key Vault references only (never typed into the app):
+          <div class="doc-table-wrap">
+            <table class="doc-table">
+              <thead><tr><th>System</th><th>Connector / auth</th><th>Integration runtime</th></tr></thead>
+              <tbody>
+                <tr><td>SAP S/4HANA</td><td>SAP Table connector, RFC/ODP delta queue, service account via Key Vault</td><td>Self-hosted IR (on-prem gateway to SAP)</td></tr>
+                <tr><td>Salesforce</td><td>Salesforce connector, OAuth 2.0 connected app</td><td>Azure IR</td></tr>
+                <tr><td>Workday</td><td>REST connector, OAuth client-credentials</td><td>Azure IR</td></tr>
+                <tr><td>Oracle EBS</td><td>Oracle DB connector, DB user via Key Vault secret</td><td>Self-hosted IR</td></tr>
+                <tr><td>Order Mgmt (SQL Server, on-prem)</td><td>SQL Server connector, Windows auth via Key Vault</td><td>Self-hosted IR</td></tr>
+                <tr><td>Vendor invoices (SFTP)</td><td>SFTP connector, SSH private key in Key Vault</td><td>Azure IR</td></tr>
+                <tr><td>Marketing spend (REST API)</td><td>Generic REST connector, API key header via Key Vault</td><td>Azure IR</td></tr>
+                <tr><td>Web clickstream (Event Hub)</td><td>Azure Event Hub connector, connection-string reference</td><td>Azure IR</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </li>
+        <li>
+          <strong>Onboarding</strong> — all ~65 objects across the eight sources are registered through
+          one CSV import per source (object, target, format, load behaviour, cadence) instead of eight
+          separate intake conversations; this becomes the shared control table every generic pipeline
+          reads from.
+        </li>
+        <li>
+          <strong>Build</strong> — one <em>Metadata-Driven Load</em> pipeline is generated per source
+          system (8 orchestrators total, not 65 hand-built pipelines): each reads its slice of the
+          control table to decide, per run, which objects are due, what load type applies, and where the
+          watermark currently sits. The one exception is the Event Hub clickstream feed, built as an
+          <em>independent</em> pattern pipeline on its own tumbling-window trigger, since it isn't a
+          table-shaped batch source.
+        </li>
+        <li>
+          <strong>Standards</strong> — a connector allow-list (only the eight approved connector types),
+          required tags (<code class="inline">source-system</code>, <code class="inline">data-domain</code>,
+          <code class="inline">pii</code>), and the always-on Key-Vault-only secret rule apply identically
+          whether the object came from SAP or a vendor's SFTP drop.
+        </li>
+        <li>
+          <strong>Validate → Push to Git → PR</strong> — every source's artifacts go through the same
+          gate: schema + Standards validation, a feature branch per source
+          (<code class="inline">feature/hub-&lt;source&gt;-onboarding</code>), and a PR into
+          <code class="inline">dev</code> — handing off to the one shared CI/CD pipeline below.
+        </li>
+      </ol>
+
+      <h3 id="approach-impact">Impact on development</h3>
+      <div class="grid-cards cols-2">
+        <div class="mini-card">
+          <strong>Before ADF Forge</strong>
+          <span>
+            Each new source took 4–6 weeks: a developer learns that connector's quirks from scratch,
+            hand-writes the pipeline, invents a naming and logging convention specific to that
+            integration, and secrets end up wherever that developer's habits put them.
+          </span>
+        </div>
+        <div class="mini-card">
+          <strong>With ADF Forge</strong>
+          <span>
+            The connector's field/auth shape is already in the registry; onboarding reduces to
+            configuring a connection, importing the object list, and generating the per-source
+            orchestrator — <strong>3–5 days</strong> for a genuinely new connector type, and
+            <strong>under a day</strong> for a source using a connector already onboarded elsewhere
+            (e.g. a second SFTP vendor after the first is live).
+          </span>
+        </div>
+      </div>
+      <ul>
+        <li><strong>Eight teams can move in parallel</strong> — the SAP team, the Salesforce team and the clickstream team each work in their own feature branch against the same shared control-table schema and metadata contract, without waiting on each other or on one "integration platform" team to hand-code their pipeline.</li>
+        <li><strong>One metadata-driven pipeline instead of 65 hand-built ones</strong> — adding object #66 to an existing source is a control-table row and an Onboarding CSV edit, not a new pipeline deployment.</li>
+        <li><strong>Consistent debugging surface</strong> — an on-call engineer investigating a failed load queries the same execution log and the same metadata columns whether the failure was in SAP, Oracle, or the clickstream feed.</li>
+        <li><strong>Standards catch cross-source drift automatically</strong> — the exact "credentials in a config file" and "no consistent cadence" problems from the Problem section are structurally prevented, not policed after the fact.</li>
+      </ul>
+
+      <h3 id="approach-cicd">CI/CD strategy</h3>
+      <p>
+        As with any ADF Forge project, the app's responsibility ends at the PR into
+        <code class="inline">dev</code> — no release/deployment UI. Because all eight sources' artifacts
+        live in the <strong>same</strong> Git repository, they ride through <strong>one shared CI/CD
+        pipeline</strong>, promoted dev → test → prod, rather than eight separate release processes:
+      </p>
+      <div class="flow">
+        <div class="flow-node"><span class="fn-eyebrow">1</span><strong>PR → dev merge</strong><span class="fn-body">Any of the 8 sources' feature branches</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent"><span class="fn-eyebrow">2</span><strong>Build &amp; validate</strong><span class="fn-body">One ARM export of the whole factory (all 8 sources' artifacts together)</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node"><span class="fn-eyebrow">3</span><strong>Deploy Dev</strong><span class="fn-body">Incremental ARM deploy — only changed linked services/pipelines/triggers actually update</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node"><span class="fn-eyebrow">4</span><strong>Deploy Test</strong><span class="fn-body">Gated on per-source smoke test + cross-source reconciliation</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent"><span class="fn-eyebrow">5</span><strong>Deploy Prod</strong><span class="fn-body">Gated on change approval; per-source trigger cutover</span></div>
+      </div>
+    </section>
+
+    <!-- ============================= 3. IMPLEMENTATION ============================= -->
+    <section class="doc-section" id="implementation">
+      <h2><span class="step-num">3</span>Implementation</h2>
+
+      <h3 id="impl-inventory">Source-to-target matrix</h3>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>#</th><th>Source</th><th>Type / format</th><th>Target</th><th>Load</th><th>Cadence</th><th>Change capture</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>SAP S/4HANA — FI/CO tables</td><td>Table (SAP ODP extractor)</td><td>curated.gl_transaction</td><td><span class="chip chip-full">Full</span> seed → <span class="chip chip-incr">Incr.</span></td><td><span class="chip chip-daily">Daily</span> (post finance close)</td><td>ODP delta queue pointer</td></tr>
+            <tr><td>2</td><td>SAP S/4HANA — Material Master</td><td>Table</td><td>curated.material</td><td><span class="chip chip-full">Full</span></td><td><span class="chip chip-daily">Daily</span></td><td>n/a — full snapshot</td></tr>
+            <tr><td>3</td><td>Salesforce — Account, Opportunity, Lead</td><td>REST/Bulk API, JSON</td><td>curated.crm_*</td><td><span class="chip chip-incr">Incremental</span></td><td><span class="chip chip-hourly">Hourly</span></td><td><code class="inline">SystemModstamp</code></td></tr>
+            <tr><td>4</td><td>Workday — Worker, Position</td><td>REST API, JSON</td><td>curated.hr_worker</td><td><span class="chip chip-incr">Incremental</span></td><td><span class="chip chip-daily">Daily</span></td><td><code class="inline">Last_Modified</code> report-as-of param</td></tr>
+            <tr><td>5</td><td>Oracle EBS — GL, AP tables</td><td>Table (Oracle DB)</td><td>curated.gl_transaction (shared with #1)</td><td><span class="chip chip-incr">Incremental</span></td><td><span class="chip chip-daily">Daily</span></td><td><code class="inline">last_update_date</code></td></tr>
+            <tr><td>6</td><td>Order Mgmt — SQL Server (on-prem)</td><td>Table</td><td>curated.order, curated.order_line</td><td><span class="chip chip-incr">Incremental</span></td><td><span class="chip chip-hourly">Hourly</span></td><td><code class="inline">rowversion</code></td></tr>
+            <tr><td>7</td><td>Vendor invoices — SFTP</td><td>File — pipe-delimited CSV, one file/vendor/day</td><td>curated.vendor_invoice</td><td><span class="chip chip-full">Full</span> (append, dated)</td><td><span class="chip chip-daily">Daily</span> (file-arrival event)</td><td>filename date + row hash</td></tr>
+            <tr><td>8</td><td>Marketing spend — Google/Meta Ads REST API</td><td>REST API, JSON</td><td>curated.marketing_spend</td><td><span class="chip chip-incr">Incremental</span> (append)</td><td><span class="chip chip-hourly">Hourly</span></td><td>API report date range, dedupe on <code class="inline">campaign_id</code>+date</td></tr>
+            <tr><td>9</td><td>Web clickstream — Event Hub</td><td>Streaming events, Avro</td><td>curated.clickstream_event</td><td><span class="chip chip-incr">Incremental</span> (append-only)</td><td><span class="chip chip-nrt">Near-real-time</span> (2-min tumbling window)</td><td><code class="inline">event_ts</code> + <code class="inline">event_id</code></td></tr>
+            <tr><td>10</td><td>Budget planning — monthly Excel upload</td><td>File — XLSX, SharePoint</td><td>curated.budget_plan</td><td><span class="chip chip-full">Full</span> (replace)</td><td>Monthly (manual + on-demand trigger)</td><td>n/a — full snapshot</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Ten object families shown (of ~65 individual objects) across eight source <em>systems</em> —
+        SAP and Oracle EBS deliberately land in the <strong>same</strong> curated GL table during the EBS
+        sunset window, which is exactly why the shared metadata contract in the next section matters:
+        <code class="inline">_source_system</code> is the only thing that tells the two apart downstream.
+      </p>
+
+      <h3 id="impl-chunking">High-volume load: chunking &amp; parallel extraction</h3>
+      <p>
+        The SAP FI/CO historical seed (12 years of GL line items, ~640M rows via the ODP extractor) and
+        the Oracle EBS GL backfill feeding the <em>same</em> curated table are the two objects too large
+        for a single Copy activity — and SAP's RFC/ODP session is also the most expensive resource here
+        to hold open, so chunking has to protect the source as much as speed up the load.
+      </p>
+      <div class="flow">
+        <div class="flow-node"><span class="fn-eyebrow">1</span><strong>Chunk-plan control table</strong><span class="fn-body">SAP: one chunk per fiscal period (12 years × 12 periods = 144 chunks). Oracle EBS: one chunk per calendar quarter.</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent"><span class="fn-eyebrow">2</span><strong>Lookup + ForEach</strong><span class="fn-body">SAP orchestrator: <code class="inline">batchCount = 3</code> (protects the RFC/ODP gateway). Oracle EBS: <code class="inline">batchCount = 6</code> (DB connector, more headroom).</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent"><span class="fn-eyebrow">3</span><strong>Copy per chunk</strong><span class="fn-body">SAP: ODP delta-queue package extract per period. Oracle EBS: dynamic range partition on <code class="inline">last_update_date</code>, parallel copies 8.</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node"><span class="fn-eyebrow">4</span><strong>Merge to curated</strong><span class="fn-body">Each chunk upserts into <code class="inline">curated.gl_transaction</code> keyed on (<code class="inline">_source_system</code>, natural key) — safe to run out of order</span></div>
+      </div>
+      <ul>
+        <li><strong>Chunk size follows the source's natural grain, not a fixed row count:</strong> SAP chunks by fiscal period because that's how the ODP extractor's delta queue is structured; Oracle EBS chunks by date range because <code class="inline">last_update_date</code> is its only reliable partition column. A one-size-fits-all row-count chunk plan doesn't hold across eight different connector types.</li>
+        <li><strong>Per-source parallelism reflects per-source cost:</strong> SAP's <code class="inline">batchCount = 3</code> is intentionally the most conservative of the eight orchestrators — an RFC/ODP session left open too long, or too many held in parallel, is the single most common way this kind of integration gets throttled or blocked by the SAP Basis team.</li>
+        <li><strong>Restartable per chunk, cross-source safe:</strong> the shared chunk-control table's status column (<code class="inline">PENDING</code>/<code class="inline">RUNNING</code>/<code class="inline">SUCCEEDED</code>/<code class="inline">FAILED</code>) is scoped per <code class="inline">source_system</code>, so a failed SAP period-37 chunk retries independently of Oracle EBS's own chunk plan even though both write into the same curated table.</li>
+        <li><strong>Merge keyed to survive out-of-order and cross-source writes:</strong> because SAP and Oracle EBS both upsert into <code class="inline">curated.gl_transaction</code>, the merge key includes <code class="inline">_source_system</code> — two chunks from different sources (or out-of-order periods from the same source) can never collide or overwrite each other's rows.</li>
+      </ul>
+      <div class="callout callout-risk">
+        <span class="callout-icon">!</span>
+        <div>
+          <strong>Why SAP gets the smallest batchCount of any of the eight sources</strong>
+          <p>Every other source here is either a cloud API with its own scaling (Salesforce, Workday, the marketing API) or a database ADF can query as hard as its own connection pool allows (Oracle EBS, SQL Server). SAP is the one system a badly-tuned chunk plan can visibly disrupt for other consumers, so its concurrency ceiling comes from the SAP Basis team's guidance, not from ADF Forge's defaults.</p>
+        </div>
+      </div>
+
+      <h3 id="impl-folders">Standard folder structure</h3>
+      <div class="doc-code">adls://lake/
+  raw/&lt;source&gt;/&lt;object&gt;/ingest_date=YYYY-MM-DD/*.{json,csv,parquet,avro}
+  curated/&lt;entity&gt;/                        # conformed by business entity, not by source
+  rejects/&lt;source&gt;/&lt;object&gt;/ingest_date=YYYY-MM-DD/*
+  archive/&lt;source&gt;/&lt;object&gt;/year=YYYY/month=MM/
+
+git-repo (ADF Forge managed, per §24.11 folder order)
+  linkedService/
+    Hub-SAP-S4.json  Hub-Salesforce.json  Hub-Workday.json  Hub-OracleEBS.json
+    Hub-OrderMgmt-SQLServer.json  Hub-VendorSFTP.json  Hub-MarketingAPI.json  Hub-Clickstream-EventHub.json
+    Hub-Lake-ADLS.json  Hub-Mart-Synapse.json
+  dataset/                    ds_&lt;source&gt;_&lt;object&gt;_src.json, ds_curated_&lt;entity&gt;_tgt.json
+  pipeline/
+    pl_hub_sap_orchestrator.json          # metadata-driven, reads control table
+    pl_hub_salesforce_orchestrator.json
+    pl_hub_workday_orchestrator.json
+    pl_hub_oracleebs_orchestrator.json
+    pl_hub_ordermgmt_orchestrator.json
+    pl_hub_vendorsftp_orchestrator.json
+    pl_hub_marketingapi_orchestrator.json
+    pl_hub_clickstream_nrt.json            # independent pattern, own trigger
+  trigger/
+    tr_hub_daily_0300.json  tr_hub_hourly.json  tr_hub_sftp_fileevent.json  tr_hub_clickstream_tumbling2m.json
+  parameter/                   hub_global_parameters.json</div>
+
+      <h3 id="impl-target-naming">Target table &amp; file naming standardization</h3>
+      <p>
+        Eight sources funneling into shared curated tables — SAP and Oracle EBS both write
+        <code class="inline">curated.gl_transaction</code> — makes an ad hoc target name per source
+        untenable; the same object would end up with two different destinations depending on who built
+        the pipeline. One fixed pattern per target kind, built from the same
+        <code class="inline">{source}/{object}</code> tokens as the pipeline naming pattern
+        removes the choice entirely:
+      </p>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Target kind</th><th>Pattern</th><th>Example</th></tr></thead>
+          <tbody>
+            <tr><td>Curated entity table (shared across sources)</td><td><code class="inline">curated.&lt;entity:snake&gt;</code></td><td><code class="inline">curated.gl_transaction</code>, <code class="inline">curated.crm_account</code></td></tr>
+            <tr><td>Warehouse mart table</td><td><code class="inline">mart.&lt;domain:lower&gt;_&lt;entity:snake&gt;</code></td><td><code class="inline">mart.finance_gl_fact</code>, <code class="inline">mart.sales_pipeline_fact</code></td></tr>
+            <tr><td>Partner-facing file extract</td><td><code class="inline">&lt;entity&gt;_&lt;source:lower&gt;_&lt;yyyyMMdd&gt;.csv</code></td><td><code class="inline">gl_transaction_sap_20260912.csv</code></td></tr>
+            <tr><td>Vendor-invoice archive file</td><td><code class="inline">vendor_invoice/ingest_date=YYYY-MM-DD/&lt;vendor&gt;_invoice_&lt;yyyyMMdd&gt;.csv</code></td><td><code class="inline">vendor_invoice/ingest_date=2026-09-12/acme_invoice_20260912.csv</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Because <code class="inline">curated.gl_transaction</code> is a fan-in target for two different
+        orchestrators, the pattern is set once at the <em>entity</em> level, not per source — the
+        Onboarding row for both the SAP and Oracle EBS GL objects points at the same target-name field
+        (§26.2), so a change to the pattern (a schema rename, say) only has to happen in one place and both
+        orchestrators pick it up. The same <code class="inline">warn</code>/<code class="inline">block</code>
+        enforcement that catches a malformed pipeline name catches a target name that skips the
+        <code class="inline">curated.</code>/<code class="inline">mart.</code> zone prefix or reuses another
+        entity's table — before a PR is opened, not after a ninth source shows up expecting the convention
+        to already be obvious.
+      </p>
+
+      <h3 id="impl-layers">Bronze/Silver/Gold layer-specific pipelines</h3>
+      <p>
+        The target architecture above names three zones — <strong>Landing/Raw</strong>, the
+        <strong>Bronze/Silver curated</strong> zone, and <strong>Gold marts</strong>. Build's first step
+        (<code class="inline">Basics → Layer</code>) makes that a real, per-pipeline choice instead of an
+        architecture diagram nobody enforces: pick <strong>Bronze</strong>, <strong>Silver</strong>, or
+        <strong>Gold</strong> and Build generates that layer's pipeline shape.
+      </p>
+      <div class="grid-cards cols-3">
+        <div class="mini-card">
+          <strong>Bronze — raw ingestion</strong>
+          <span>Exactly the eight orchestrators already described above: a plain metadata-driven copy from
+          each source into <code class="inline">raw.&lt;source&gt;_&lt;object&gt;</code>. No transformations —
+          this is today's pipeline shape, unchanged.</span>
+        </div>
+        <div class="mini-card">
+          <strong>Silver — conformed/curated</strong>
+          <span>Reads the landed Bronze object and appends a transformation chain — conform column names,
+          dedupe on a natural key, cast types, or maintain SCD2 history — before writing the shared
+          <code class="inline">curated.&lt;entity&gt;</code> table (e.g. <code class="inline">curated.gl_transaction</code>,
+          fed by both the SAP and Oracle EBS orchestrators).</span>
+        </div>
+        <div class="mini-card">
+          <strong>Gold — business marts</strong>
+          <span>Joins curated entities and aggregates them into a business-facing
+          <code class="inline">mart.&lt;domain&gt;_&lt;entity&gt;</code> table — e.g.
+          <code class="inline">mart.finance_gl_fact</code>, joining <code class="inline">curated.gl_transaction</code>
+          with <code class="inline">curated.customer</code> and aggregating by customer and posting month.</span>
+        </div>
+      </div>
+      <p>
+        The target table name is <strong>computed</strong> from the entity/domain you enter, not freely
+        typed — the same "no ad hoc target name per source" discipline as the naming standard above, now
+        enforced by construction for every layer, not just documented in this guide.
+      </p>
+      <div class="callout callout-risk">
+        <span class="callout-icon">!</span>
+        <div>
+          <strong>What "reads the landed Bronze object" means today</strong>
+          <p>Each layer's pipeline is generated independently — a Silver pipeline re-copies from the
+          original source rather than literally chaining off a separate Bronze pipeline's own run. The
+          planned STTM registry below (<code class="inline">source_object_keys</code>) formalizes the
+          *intended* lineage (which Bronze/Silver objects a Silver/Gold entity is built from) as
+          persisted metadata, which is a step toward real Bronze→Silver→Gold chaining, but doesn't by
+          itself change how a generated pipeline executes.</p>
+        </div>
+      </div>
+
+      <h3 id="impl-sttm">Bulk-onboarding Silver/Gold with an STTM workbook (target design)</h3>
+      <p>
+        Typing a curated entity name and hand-building a transformation chain works for one pipeline at
+        a time, but the inventory above has <strong>eight sources landing into a handful of shared
+        curated entities</strong> (<code class="inline">curated.gl_transaction</code>,
+        <code class="inline">curated.customer</code>, …) and several marts built on top of them — that's
+        naturally a bulk-authoring problem, not a one-row-at-a-time one. The STTM registry (target design,
+        not built yet) plans a downloadable, multi-tab <strong>STTM (Source-to-Target Mapping) Excel
+        workbook</strong> for exactly this: one sheet per curated entity or mart, a worked example sheet,
+        and a reference sheet listing every transformation and data-quality rule type the tool supports.
+      </p>
+      <div class="grid-cards cols-3">
+        <div class="mini-card">
+          <strong>1. Download the template</strong>
+          <span>From Onboarding's Silver or Gold tab — a separate workbook per layer, since their
+          mandatory columns and transformation vocabularies differ.</span>
+        </div>
+        <div class="mini-card">
+          <strong>2. Fill one sheet per entity</strong>
+          <span>E.g. a <code class="inline">curated_gl_transaction</code> sheet listing its
+          <code class="inline">source_object_keys</code> (the SAP and Oracle EBS Bronze objects it's
+          built from), a mandatory classification <code class="inline">tag</code>, and up to 10
+          transformation rows (conform columns, dedupe, cast, or — per the widened rule set — a join)
+          plus up to 5 data-quality rows.</span>
+        </div>
+        <div class="mini-card">
+          <strong>3. Upload, preview, commit</strong>
+          <span>Each sheet is validated independently; valid sheets commit into the Silver/Gold
+          registry, ready to pick from a dropdown in Build's Basics step instead of retyping any of
+          this per pipeline.</span>
+        </div>
+      </div>
+      <p>
+        A mart like <code class="inline">mart.finance_gl_fact</code> — joining
+        <code class="inline">curated.gl_transaction</code> with <code class="inline">curated.customer</code>
+        — is exactly the case that motivated widening the transformation rule set: Gold objects can now
+        use <code class="inline">scd2</code> (for a slowly-changing customer dimension feeding the fact
+        table) alongside <code class="inline">join</code>/<code class="inline">aggregate</code>, and a
+        Silver entity built from two sources can use <code class="inline">join</code> during
+        conformance, not only after landing in Gold.
+      </p>
+
+      <h3 id="impl-metadata">Standard metadata columns</h3>
+      <p>The same 12-column contract lands in every curated table, regardless of which of the eight sources fed it — this is the single biggest lever for making eight silos behave like one platform:</p>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Column</th><th>Type</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code class="inline">_source_system</code></td><td>string</td><td>One of <code class="inline">SAP</code>, <code class="inline">SALESFORCE</code>, <code class="inline">WORKDAY</code>, <code class="inline">ORACLE_EBS</code>, <code class="inline">ORDER_MGMT</code>, <code class="inline">VENDOR_SFTP</code>, <code class="inline">MARKETING_API</code>, <code class="inline">CLICKSTREAM</code> — the field that disambiguates shared curated tables like <code class="inline">gl_transaction</code>.</td></tr>
+            <tr><td><code class="inline">_source_object</code></td><td>string</td><td>Native object/endpoint/file name in the source system.</td></tr>
+            <tr><td><code class="inline">_pipeline_run_id</code></td><td>guid</td><td>ADF run ID — joins to the shared execution log.</td></tr>
+            <tr><td><code class="inline">_batch_id</code></td><td>string</td><td>Logical batch/date key, consistent across all 8 orchestrators.</td></tr>
+            <tr><td><code class="inline">_ingestion_ts_utc</code></td><td>datetime2</td><td>Landing time in curated, UTC.</td></tr>
+            <tr><td><code class="inline">_source_row_hash</code></td><td>string (sha256)</td><td>Cross-source-safe change detection and dedupe (critical for the SAP/Oracle EBS shared-table case).</td></tr>
+            <tr><td><code class="inline">_watermark_value</code></td><td>string</td><td>Audit of the incremental extraction point per object.</td></tr>
+            <tr><td><code class="inline">_api_extract_window</code></td><td>string</td><td>For REST/API sources (Salesforce, Workday, Marketing API): the request date-range/report parameter actually sent — makes an API-side gap reproducible.</td></tr>
+            <tr><td><code class="inline">_is_current</code>, <code class="inline">_valid_from</code>, <code class="inline">_valid_to</code></td><td>bool / datetime2</td><td>SCD2 history for entities requiring point-in-time history (GL, order status).</td></tr>
+            <tr><td><code class="inline">_dq_status</code></td><td>string</td><td><code class="inline">PASS</code> / <code class="inline">WARN</code> / <code class="inline">REJECTED</code> — schema and required-field checks applied uniformly at landing.</td></tr>
+            <tr><td><code class="inline">_load_type</code></td><td>string</td><td><code class="inline">FULL</code> or <code class="inline">INCREMENTAL</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Configured once, project-wide, in <code class="inline">Project Settings → Metadata &amp; parameters</code> — every one of the 8 metadata-driven orchestrators applies the same set, so a 9th source inherits it automatically rather than needing its own definition.</p>
+
+      <h3 id="impl-logging">Standard logging</h3>
+      <p>One shared execution log across all eight sources — the same shape as any ADF Forge project, with one addition (<code class="inline">source_system</code>) that lets an on-call engineer filter by system in a single dashboard instead of eight:</p>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Column</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code class="inline">run_id</code></td><td>ADF pipeline run ID (primary key)</td></tr>
+            <tr><td><code class="inline">source_system</code></td><td>Which of the 8 sources this run belongs to</td></tr>
+            <tr><td><code class="inline">pipeline_name</code></td><td>e.g. <code class="inline">pl_hub_salesforce_orchestrator</code></td></tr>
+            <tr><td><code class="inline">source_object</code> / <code class="inline">target_object</code></td><td>What was read / written for this child iteration</td></tr>
+            <tr><td><code class="inline">load_type</code></td><td><code class="inline">FULL</code> / <code class="inline">INCREMENTAL</code></td></tr>
+            <tr><td><code class="inline">start_time_utc</code> / <code class="inline">end_time_utc</code></td><td>Wall-clock window of the run</td></tr>
+            <tr><td><code class="inline">rows_read</code> / <code class="inline">rows_written</code> / <code class="inline">rows_rejected</code></td><td>Row-level accounting, per object per run</td></tr>
+            <tr><td><code class="inline">watermark_start</code> / <code class="inline">watermark_end</code></td><td>Incremental window actually processed</td></tr>
+            <tr><td><code class="inline">status</code></td><td><code class="inline">SUCCEEDED</code> / <code class="inline">FAILED</code> / <code class="inline">SUCCEEDED_WITH_WARNINGS</code></td></tr>
+            <tr><td><code class="inline">error_message</code></td><td>Raw ADF activity error on failure</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Turned on once per source connection's Pipeline Settings step in Build ("Azure Monitor logging + custom log columns") — an author opts in per object, but the destination table, schema, and Azure Monitor alert rule are the one shared standard, never reinvented per source.</p>
+
+      <h3 id="impl-dq">Data quality checks</h3>
+      <p>
+        Two sources (SAP and Oracle EBS) write into the same <code class="inline">curated.gl_transaction</code>
+        table — exactly the shared-target case where a bad row from either side is hardest to trace back.
+        Each rule below is authored on the object in Build's Pipeline Settings step
+        (up to 5 per pipeline) and becomes a real pre-copy
+        Lookup activity in that object's generated child pipeline, independent of which source it came from:
+      </p>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Object</th><th>Rule</th><th>Config</th><th>Enforcement</th><th>Generated as</th></tr></thead>
+          <tbody>
+            <tr><td><code class="inline">GL_TRANSACTION</code> (SAP &amp; Oracle EBS)</td><td><code class="inline">IS_NOT_NULL</code></td><td>column <code class="inline">TransactionId</code></td><td><span class="pill pill-amber">Block</span></td><td><code class="inline">DQ_transaction_id_required_Check</code> (Lookup) → <code class="inline">DQ_transaction_id_required_Gate</code> (IfCondition → Fail)</td></tr>
+            <tr><td><code class="inline">GL_TRANSACTION</code></td><td><code class="inline">RANGE_BETWEEN</code></td><td>column <code class="inline">Amount</code>, value <code class="inline">-1000000,1000000</code></td><td><span class="pill">Warn</span></td><td>Lookup only — flags an out-of-range posting for finance to review without stopping either source's daily close</td></tr>
+            <tr><td><code class="inline">CUSTOMER</code> (Salesforce)</td><td><code class="inline">REGEX_MATCH</code></td><td>column <code class="inline">Email</code>, value <code class="inline">%@%</code></td><td><span class="pill">Warn</span></td><td>Lookup only, using T-SQL <code class="inline">PATINDEX</code> as the built-in approximation — swap in a real regex/CLR check if your target engine supports one</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        This app never runs the check itself or reads either system's live data (§30.3's scope boundary) —
+        the Lookup's SQL executes in ADF, at run time, like any other generated activity. Because
+        <code class="inline">Block</code> is itself a Standards enforcement level (§25.2), a shared-table
+        scenario like this can require "primary key not-null, blocking" as an org policy rule regardless of
+        which of the 8 sources authors the pipeline.
+      </p>
+
+      <h3 id="impl-triggers">Trigger &amp; cadence design</h3>
+      <div class="grid-cards cols-3">
+        <div class="mini-card"><strong><span class="chip chip-daily">Daily</span> — finance close &amp; reference data</strong><span>Schedule trigger, 03:00 UTC after SAP/Oracle EBS finance close. SAP FI/CO, Material Master, Oracle EBS GL/AP, Workday, monthly budget file (on-demand override).</span></div>
+        <div class="mini-card"><strong><span class="chip chip-hourly">Hourly</span> — CRM, orders, marketing</strong><span>Tumbling window trigger, 60-minute window. Salesforce, Order Management, Marketing spend API.</span></div>
+        <div class="mini-card"><strong><span class="chip chip-nrt">Near-real-time</span> — clickstream</strong><span>Tumbling window trigger, 2-minute window, consuming the Event Hub via ADF's Event Hub source — genuinely streaming-adjacent since the source itself is an event feed, unlike Guide 1's polled near-real-time case.</span></div>
+      </div>
+      <div class="callout callout-risk">
+        <span class="callout-icon">!</span>
+        <div>
+          <strong>File-arrival cadence for the SFTP vendor feed</strong>
+          <p>The vendor invoice drop doesn't run on a clock — it fires from a storage-event trigger the moment the file lands (typically between 01:00–04:00 UTC, vendor-dependent), then falls back to a 06:00 UTC schedule trigger as a safety net so a missed event doesn't silently skip a day.</p>
+        </div>
+      </div>
+
+      <h3 id="impl-orchestration">Orchestration design</h3>
+      <p>
+        Eight metadata-driven orchestrators run independently — one per source, on its own schedule —
+        but two of them, SAP and Oracle EBS, write into the same curated table, so orchestration also
+        has to manage a dependency <em>between</em> sources, not just within one.
+      </p>
+      <div class="flow">
+        <div class="flow-node"><span class="fn-eyebrow">Per source</span><strong>pl_hub_&lt;source&gt;_orchestrator</strong><span class="fn-body">Lookup control table for objects due → ForEach (batchCount tuned per source) → Execute Pipeline per object</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent"><span class="fn-eyebrow">Guard</span><strong>SAP → Oracle EBS sequencing</strong><span class="fn-body">Oracle EBS's tumbling window declares a trigger dependency on SAP's daily run — EBS never starts until SAP's GL merge for that day has succeeded</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node"><span class="fn-eyebrow">Aggregate</span><strong>If Condition, per orchestrator</strong><span class="fn-body">Any child object failure fails that source's run as one alert, filtered by source_system in the shared log</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent"><span class="fn-eyebrow">Downstream</span><strong>Cross-source mart refresh</strong><span class="fn-body">Triggered only once all same-day-cadence orchestrators report success — not on a fixed clock offset</span></div>
+      </div>
+      <div class="grid-cards cols-2">
+        <div class="mini-card">
+          <strong>Within a source: fan-out with a concurrency ceiling</strong>
+          <span>Each of the eight orchestrators is the same shape — Lookup the control table's due objects, <code class="inline">ForEach</code> with a per-source <code class="inline">batchCount</code>, <code class="inline">Execute Pipeline</code> per object with wait-on-completion — but the ceiling itself is tuned per source (SAP 3, Salesforce 4 to respect Bulk API limits, the rest 6–8).</span>
+        </div>
+        <div class="mini-card">
+          <strong>Across sources: an explicit dependency, not a time gap</strong>
+          <span>Rather than scheduling Oracle EBS "30 minutes after SAP and hoping," EBS's trigger declares a real dependency on SAP's run succeeding — the same tumbling-window-dependency mechanism used for the hourly sources' self-dependency, applied across pipelines instead of within one.</span>
+        </div>
+      </div>
+      <ul>
+        <li><strong>Independent pattern for the one non-batch source:</strong> the clickstream pipeline is deliberately outside every orchestrator — it has its own tumbling-window self-dependency so a slow 2-minute window can't overlap the next one, and no other source's failure can ever block or delay it.</li>
+        <li><strong>Restartable per object, not per source:</strong> a re-run of the Salesforce orchestrator after a partial failure only re-executes the child pipelines whose control-table row didn't reach <code class="inline">SUCCEEDED</code> — the other objects (and the other seven sources) are untouched.</li>
+        <li><strong>One shared failure surface:</strong> whether the failure is a chunked SAP backfill, a per-object child pipeline, or the clickstream feed, every run writes to the same execution log filtered by <code class="inline">source_system</code> — eight orchestrators, one on-call dashboard.</li>
+        <li><strong>Scales to a 9th source without new orchestration engineering:</strong> a new source gets its own orchestrator built from the same Build template; it only needs an explicit trigger dependency added if it shares a curated table with an existing source, same as the SAP → Oracle EBS case above.</li>
+      </ul>
+
+      <h3 id="impl-walkthrough">Built with ADF Forge — step by step</h3>
+      <ol>
+        <li><strong>Connections:</strong> Create the ten linked services from the matrix above, each tagged Source (lake/warehouse tagged Target); every credential/API key/connection string is a Key Vault reference.</li>
+        <li><strong>Onboarding:</strong> One CSV import per source (8 imports covering ~65 objects) — Upload → Map columns → Validate → Commit; the SAP and Oracle EBS rows are flagged during Validate for pointing at the same target table, confirmed as intentional (the EBS-sunset design).</li>
+        <li><strong>Build → Basics, per source:</strong> Generation template = Metadata-Driven Load for the seven table/API/file sources; pipeline pattern = independent for the Event Hub clickstream pipeline (it isn't object-list-driven). Layer = Bronze for each source's raw ingestion orchestrator; the curated <code class="inline">gl_transaction</code>/<code class="inline">crm_account</code>/etc. entities and the finance/sales marts are each their own Silver/Gold pipeline (see <a href="#impl-layers">Bronze/Silver/Gold layer-specific pipelines</a>).</li>
+        <li><strong>Build → Source/Target, per source:</strong> Pick that source's saved connection; source objects prefill from Onboarding; watermark column(s) set per the change-capture column in the matrix.</li>
+        <li><strong>Build → Pipeline Settings, per source:</strong> Retry/backoff tuned per source's API rate limits (e.g. Salesforce Bulk API retry with exponential backoff); the 11 standard metadata columns and Azure Monitor logging attached identically across all eight. SAP's and Oracle EBS's one-time historical seeds additionally set Partition &amp; chunking (144 fiscal-period chunks / batchCount 3 for SAP, quarterly chunks / batchCount 6 for EBS — see <a href="#impl-chunking">High-volume load</a> above).</li>
+        <li><strong>Review &amp; Generate, per source:</strong> Eight separate Generate actions produce eight orchestrator pipelines (plus their datasets, linked services, triggers) as new <code class="inline">DRAFT</code>s — never one giant pipeline for all sources.</li>
+        <li><strong>Validate:</strong> Standards' connector allow-list, required tags, and Key-Vault-only rule run against all eight source's artifacts identically.</li>
+        <li><strong>Push to Git → PR, per source:</strong> Eight feature branches, eight PRs into <code class="inline">dev</code> — reviewed independently by each source's owning team, merged on their own schedule, but landing in the one shared repository the CI/CD pipeline below watches.</li>
+      </ol>
+
+      <h3 id="impl-cicd">CI/CD pipeline, stage by stage</h3>
+      <p>One shared pipeline configuration serves every source — a 9th source added next quarter needs zero new CI/CD engineering, only a new PR into the existing flow:</p>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Stage</th><th>Trigger</th><th>What happens</th></tr></thead>
+          <tbody>
+            <tr><td><strong>1 · PR review</strong></td><td>Any source's PR opened against <code class="inline">dev</code></td><td>Required status check re-runs schema + Standards validation on the changed artifacts only (not all eight sources) — fast feedback regardless of which source's team is shipping.</td></tr>
+            <tr><td><strong>2 · Build &amp; export</strong></td><td>Merge to <code class="inline">dev</code></td><td><code class="inline">@microsoft/azure-data-factory-utilities</code> exports the whole factory's ARM template from the collaboration branch — all eight sources' definitions together, since ADF's own publish model is factory-wide, not per-source.</td></tr>
+            <tr><td><strong>3 · Deploy Dev</strong></td><td>Automatic, on stage 2 success</td><td><code class="inline">azure/arm-deploy</code> applies an <em>incremental</em> ARM deployment — only the linked service/pipeline/trigger objects that actually changed are touched; the other seven sources' resources are untouched. Post-deployment script reconciles removed objects and restarts affected triggers only.</td></tr>
+            <tr><td><strong>4 · Per-source smoke test</strong></td><td>Automatic, after Dev deploy</td><td>Runs only the orchestrator(s) whose artifacts changed, asserting <code class="inline">rows_written &gt; 0</code> and <code class="inline">status = SUCCEEDED</code> in the shared execution log, filtered by <code class="inline">source_system</code>.</td></tr>
+            <tr><td><strong>5 · Deploy Test</strong></td><td>Manual approval (QA sign-off for that source's owning team)</td><td>Same ARM artifact redeployed with Test parameters; a cross-source reconciliation job checks that <code class="inline">gl_transaction</code> row counts split by <code class="inline">_source_system</code> match SAP's and Oracle EBS's own reported totals.</td></tr>
+            <tr><td><strong>6 · Deploy Prod</strong></td><td>Manual approval (change-advisory sign-off)</td><td>Same ARM artifact redeployed with Prod parameters; that source's triggers are cut over on its own schedule — the other seven sources are unaffected by one source's cutover date.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout callout-cicd">
+        <span class="callout-icon">✓</span>
+        <div>
+          <strong>Per-source blast radius, shared pipeline</strong>
+          <p>Because the ARM deploy is incremental and the smoke test filters by <code class="inline">source_system</code>, eight teams share one CI/CD configuration without one source's bad deploy blocking or masking another's — the exact scaling property a one-pipeline-per-source approach couldn't offer without eight times the CI/CD engineering.</p>
+        </div>
+      </div>
+
+      <h3 id="impl-control-promotion">Promoting onboarded source &amp; control-table metadata</h3>
+      <p>
+        The factory-wide ARM template in stage 2 only carries the ADF artifacts — pipelines, datasets,
+        linked services, triggers — for all eight sources together. It says nothing about
+        <em>which of the ~65 onboarded objects are enabled, their watermark column, or their target
+        path</em> — that shared inventory lives in <code class="inline">control.adf_control_table</code>,
+        the single table every one of the eight metadata-driven orchestrators <code class="inline">Lookup</code>s
+        at runtime. Promoting it across Dev → Test → Prod rides the same PR and the same shared CI/CD
+        run as the ARM deploy above, per source:
+      </p>
+      <ol>
+        <li><strong>Onboard or update a source's rows in ADF Forge:</strong> that source's team runs
+        its own <code class="inline">Onboarding</code> CSV import or manual-grid edit, then
+        <strong>Generate control-table SQL</strong> produces <code class="inline">&lt;sql&gt;/adf_control_table.sql</code>
+        (DDL plus one seed <code class="inline">INSERT</code> per enabled object, scoped to that
+        source's rows) and an <code class="inline">objects.csv</code> snapshot — committed to that
+        source's own feature branch and PR, never hand-typed against a live database.</li>
+        <li><strong>Reviewed alongside that source's pipeline diff (stage 1):</strong> the owning
+        team's reviewer sees only its own control-table row changes — e.g. a new SAP fiscal-period
+        object or an edited Salesforce watermark column — not the other seven sources' rows, even
+        though every source shares the one table.</li>
+        <li><strong>Applied to Dev's control database (parallel to stage 3):</strong> a CI/CD step
+        runs that source's <code class="inline">adf_control_table.sql</code> against the Dev
+        control-table database — connection resolved from Project Settings → Metadata &amp;
+        parameters, credential from Key Vault, never typed into ADF Forge or the script — as an
+        idempotent upsert, so the other seven sources' rows are untouched.</li>
+        <li><strong>Proven by the per-source smoke test (stage 4):</strong> that source's orchestrator
+        run succeeding confirms the ARM-deployed pipeline and the newly promoted control-table rows
+        agree for its objects specifically, without needing to re-run all eight sources' smoke tests.</li>
+        <li><strong>Promoted unchanged to Test, then Prod (stages 5–6):</strong> the identical
+        per-source <code class="inline">adf_control_table.sql</code> artifact — never hand-edited or
+        regenerated per environment — is applied to Test's and Prod's own control databases under that
+        source's own QA and change-advisory sign-offs, so a 9th source added later, or one source's
+        cutover, never touches the other seven sources' already-promoted rows.</li>
+        <li><strong>Rollback:</strong> every source's <code class="inline">adf_control_table.sql</code>
+        is retained and versioned by the CI/CD run number, exactly like the ARM template — a bad
+        promotion for one source (an object enabled too early, a wrong watermark seed) is fixed by
+        re-applying that source's previous run's SQL artifact, never by hand-editing rows in the
+        shared live control table.</li>
+      </ol>
+
+      <h3 id="impl-governance">Governance &amp; scaling notes</h3>
+      <ul>
+        <li><strong>Connector allow-list:</strong> Standards' Connection category restricts new pipelines to the ten approved connector/linked-service types above at <code class="inline">Block</code> — a team can't quietly wire up an eleventh ad hoc integration outside this pattern.</li>
+        <li><strong>Onboarding a 9th source:</strong> register its connector in Connections (reusing the registry if the connector type already exists, e.g. a second REST API source), import its object list in Onboarding, generate one Metadata-Driven orchestrator in Build — no changes needed to the shared CI/CD pipeline, the metadata contract, or the execution log schema.</li>
+        <li><strong>EBS sunset path:</strong> when Oracle EBS retires, its orchestrator pipeline and linked service are simply disabled and later removed via a normal PR — the shared <code class="inline">curated.gl_transaction</code> table and every downstream mart query are unaffected, since <code class="inline">_source_system</code> already isolates EBS's rows.</li>
+        <li><strong>Cost/ops note:</strong> the near-real-time clickstream pipeline is the only one billed on a continuous tumbling-window cadence — it's scoped to the one feed with an actual sub-hour business need, not applied as a default across all eight sources.</li>
+      </ul>
+    </section>
+
+    <p class="doc-footnote">
+      Reference implementation for Delivery → Sample Guides. Every screen, wizard step and lifecycle
+      state named above matches the ADF Forge product exactly as shipped — open the in-app
+      <em>User guide</em> (help icon) for the live version of this walkthrough.
+    </p>
+  </main>
+</div>
+</body>
+</html>

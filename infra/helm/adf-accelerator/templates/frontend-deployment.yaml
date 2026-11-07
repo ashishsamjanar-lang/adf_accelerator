@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "adf-accelerator.fullname" . }}-frontend
+  labels:
+    {{- include "adf-accelerator.componentLabels" (dict "root" . "component" "frontend") | nindent 4 }}
+spec:
+  {{- if not .Values.frontend.autoscaling.enabled }}
+  replicas: {{ .Values.frontend.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "adf-accelerator.componentSelectorLabels" (dict "root" . "component" "frontend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "adf-accelerator.componentLabels" (dict "root" . "component" "frontend") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "adf-accelerator.serviceAccountName" . }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: web
+          image: {{ include "adf-accelerator.image" (dict "repository" .Values.image.frontend.repository "tag" .Values.image.tag "chartAppVersion" .Chart.AppVersion "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            # Server-only, read at request time by frontend/middleware.ts —
+            # never NEXT_PUBLIC_* — so the same image works unmodified across
+            # namespaces/clusters/environments; only this value differs.
+            - name: BACKEND_INTERNAL_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "adf-accelerator.fullname" . }}-config
+                  key: BACKEND_INTERNAL_URL
+            {{- if .Values.frontend.nextPublicApiBaseUrl }}
+            - name: NEXT_PUBLIC_API_BASE_URL
+              value: {{ .Values.frontend.nextPublicApiBaseUrl | quote }}
+            {{- end }}
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

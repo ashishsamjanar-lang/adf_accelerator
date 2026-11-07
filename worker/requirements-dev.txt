@@ -1,0 +1,4 @@
+# Pinned test/dev deps on top of requirements.txt. Install this for local dev and in
+# CI (worker-tests, generator-parity); the deployed image never installs it.
+-r requirements.txt
+pytest==8.3.3

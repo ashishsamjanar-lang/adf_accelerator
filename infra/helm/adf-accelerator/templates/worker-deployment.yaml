@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "adf-accelerator.fullname" . }}-worker
+  labels:
+    {{- include "adf-accelerator.componentLabels" (dict "root" . "component" "worker") | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "adf-accelerator.componentSelectorLabels" (dict "root" . "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "adf-accelerator.componentLabels" (dict "root" . "component" "worker") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "adf-accelerator.serviceAccountName" . }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "adf-accelerator.image" (dict "repository" .Values.image.worker.repository "tag" .Values.image.tag "chartAppVersion" .Chart.AppVersion "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # No ports/probes: a stateless poll loop (worker/app/jobs/loop.py),
+          # never called over HTTP — same shape as infra/main.bicep's
+          # workerApp (no ingress block).
+          envFrom:
+            - configMapRef:
+                name: {{ include "adf-accelerator.fullname" . }}-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "adf-accelerator.secretName" . }}
+                  key: {{ .Values.secrets.keys.databaseUrl }}
+            - name: GIT_TOKEN_FERNET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "adf-accelerator.secretName" . }}
+                  key: {{ .Values.secrets.keys.gitTokenFernetKey }}
+            - name: GIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "adf-accelerator.secretName" . }}
+                  key: {{ .Values.secrets.keys.gitToken }}
+                  optional: true
+            {{- with .Values.worker.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

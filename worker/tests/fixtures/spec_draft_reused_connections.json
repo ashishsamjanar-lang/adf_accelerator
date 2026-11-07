@@ -1,0 +1,32 @@
+{
+  "name": "customer_reused_connections",
+  "projectId": "proj-parity-test",
+  "templateId": "incremental_load",
+  "sourceType": "sql_server",
+  "sourceObject": "dbo.customer",
+  "targetType": "azure_data_lake_storage_gen2",
+  "targetPath": "/customer/",
+  "sourceObjectMode": "form",
+  "sourceObjects": [
+    { "object": "dbo.customer", "watermarkColumn": "modified_date" }
+  ],
+  "sourceConnectionReused": true,
+  "targetConnectionReused": true,
+  "watermarkEnabled": true,
+  "watermarkType": "single",
+  "watermarkColumns": [{ "name": "modified_date", "type": "datetime", "order": 1 }],
+  "watermarkTable": "control.watermarks",
+  "watermarkInitialValue": "1900-01-01",
+  "loadTypeMode": "incremental",
+  "masterChildPattern": true,
+  "isSequential": false,
+  "batchCount": 10,
+  "parallelCopies": 8,
+  "retryCount": 2,
+  "retryIntervalInSeconds": 15,
+  "enableCopyLog": true,
+  "logLevel": "Info",
+  "sinkFileFormat": "Parquet",
+  "copyBehavior": "PreserveHierarchy",
+  "writeBehavior": "Insert"
+}

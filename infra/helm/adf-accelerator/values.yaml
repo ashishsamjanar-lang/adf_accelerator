@@ -1,0 +1,173 @@
+# Default values for adf-accelerator.
+#
+# Design goal: this chart must install unmodified on any conformant Kubernetes
+# — EKS, GKE, AKS, on-prem (kubeadm/k3s/OpenShift), or a laptop's kind/minikube —
+# with no Azure-specific assumption baked into a template. Every place a real
+# deployment differs (registry, ingress controller, secret source, cloud identity)
+# is a value below, never a hardcoded resource type in templates/.
+#
+# Same product boundary as infra/main.bicep (see infra/README.md): this chart
+# deploys the application only. It never provisions Postgres or a secret store —
+# bring your own and point this chart at them.
+
+global:
+  # Prefixed onto every image repository below if set, e.g. "ghcr.io/yourorg/"
+  # or "your-registry.azurecr.io/". Leave blank if image.*.repository below is
+  # already a fully-qualified path.
+  imageRegistry: ""
+  # Name(s) of existing `kubernetes.io/dockerconfigjson` Secret(s) for pulling
+  # private images — create with `kubectl create secret docker-registry ...`
+  # (or your registry's own operator) before installing. Not needed for a
+  # public registry.
+  imagePullSecrets: []
+
+image:
+  pullPolicy: IfNotPresent
+  # Common tag override for all three images (matches how deploy.yml/deploy
+  # pipelines build-once-tag-with-git-sha and promote the same tag across
+  # environments). Leave blank to fall back to Chart.appVersion.
+  tag: ""
+  backend:
+    repository: adf-accelerator-backend
+  worker:
+    repository: adf-accelerator-worker
+  frontend:
+    repository: adf-accelerator-frontend
+
+# --- Non-secret application configuration (backend + worker Settings, both
+# typed in backend/app/config.py / worker/app/config.py) -------------------
+config:
+  appName: adf-accelerator
+  appEnv: production
+  logLevel: INFO
+  # mock (no auth — demo/CI only, never for a real client) | password
+  # (email+password + cookie sessions — first admin via
+  # `python -m app.manage create-platform-admin`) | oidc | saml (§27.2, not
+  # implemented yet — current_user() 501s on these two).
+  authMode: password
+  # SQLAlchemy pool sizing per backend replica — raise if you run more
+  # backend.replicaCount or your Postgres's max_connections is generous.
+  dbPoolSize: 10
+  dbMaxOverflow: 10
+  # Arbitrary extra non-secret env vars, applied to both backend and worker
+  # (e.g. future OIDC issuer/client-id config once §27's SSO adapter lands —
+  # add keys here with no chart change required).
+  extraEnv: {}
+
+# --- Secrets ---------------------------------------------------------------
+# Two ways to supply DATABASE_URL / GIT_TOKEN_FERNET_KEY / GIT_TOKEN — pick
+# whichever matches how this client already manages secrets. The chart's
+# Deployments only ever reference a Secret by name and key; they never care
+# which of the two produced it.
+secrets:
+  # Option A — let the chart create a plain Secret from the values below.
+  # Convenient for a quick eval install; NOT recommended for production since
+  # the values then live in plaintext in your values file / Helm release
+  # state. Prefer Option B for any real environment.
+  create: false
+  databaseUrl: ""
+  gitTokenFernetKey: ""
+  gitToken: ""
+
+  # Option B (recommended) — point at a Secret you manage with your own
+  # tooling: a plain `kubectl create secret generic`, External Secrets
+  # Operator, the Vault Agent Injector / Vault CSI provider, Sealed Secrets,
+  # or a cloud Secrets Store CSI driver (Azure Key Vault, AWS Secrets
+  # Manager, GCP Secret Manager) all just need to land a Secret with this
+  # name in this namespace — how they populate it is entirely up to you.
+  existingSecret: ""
+  # Key names inside existingSecret/the chart-created Secret. Override the
+  # right-hand side only if your existing Secret already uses different keys.
+  keys:
+    databaseUrl: DATABASE_URL
+    gitTokenFernetKey: GIT_TOKEN_FERNET_KEY
+    gitToken: GIT_TOKEN
+
+serviceAccount:
+  create: true
+  name: ""
+  # Cloud workload-identity binding, entirely optional and additive — the
+  # chart never special-cases a cloud, it just passes annotations through:
+  #   AWS (IRSA):    eks.amazonaws.com/role-arn: arn:aws:iam::...:role/...
+  #   GCP (Workload Identity): iam.gke.io/gcp-service-account: sa@project.iam.gserviceaccount.com
+  #   Azure (Workload Identity): azure.workload.identity/client-id: <uuid>
+  # Leave empty to authenticate however your cluster otherwise allows
+  # (e.g. a plain existingSecret from Option B above needs none of this).
+  annotations: {}
+
+backend:
+  replicaCount: 2
+  service:
+    port: 8000
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: "1", memory: 1Gi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  # Raw additional container env entries (k8s `env:` list shape, so this can
+  # include valueFrom/secretKeyRef too) — for anything config.extraEnv's
+  # simple string map can't express. Example:
+  #   extraEnv:
+  #     - name: SOME_KEY
+  #       valueFrom: { secretKeyRef: { name: other-secret, key: SOME_KEY } }
+  extraEnv: []
+
+worker:
+  # A stateless poll loop (worker/app/jobs/loop.py), not an HTTP service —
+  # never 0 (an enqueued job would sit unclaimed until a replica exists) and
+  # safe to run >1 (jobs are claimed via `FOR UPDATE SKIP LOCKED`, same
+  # concurrency-safety note as infra/main.bicep's workerApp).
+  replicaCount: 1
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: "1", memory: 1Gi }
+  extraEnv: []
+
+frontend:
+  replicaCount: 2
+  service:
+    port: 3000
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  # Only needed if the browser must call the API origin directly instead of
+  # through the built-in same-origin proxy (frontend/middleware.ts) — leave
+  # unset in the normal case. See config/platform.env.example's own note:
+  # baked into the client bundle at build time if set.
+  nextPublicApiBaseUrl: ""
+
+# --- Ingress -----------------------------------------------------------
+# Fronts the frontend Service only — frontend/middleware.ts proxies
+# /api/:path* to the backend Service in-cluster, so no separate backend path
+# routing is needed here (mirrors the same-origin-proxy design used against
+# Azure Container Apps in infra/main.bicep). Works with any ingress
+# controller (ingress-nginx, ALB Ingress Controller on EKS, GKE Ingress,
+# Traefik, an on-prem controller, ...) — just set className/annotations for
+# the one this cluster runs.
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+  host: ""
+  tls: []
+  # tls:
+  #   - secretName: adf-accelerator-tls
+  #     hosts: ["adf-accelerator.example.com"]
+
+# PodDisruptionBudget for backend/frontend (worker deliberately excluded —
+# single-purpose poll loop, no HA requirement beyond replicaCount itself).
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

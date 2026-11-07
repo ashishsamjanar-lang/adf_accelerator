@@ -1,0 +1,25 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "adf-accelerator.fullname" . }}-backend
+  labels:
+    {{- include "adf-accelerator.componentLabels" (dict "root" . "component" "backend") | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "adf-accelerator.componentSelectorLabels" (dict "root" . "component" "backend") | nindent 6 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "adf-accelerator.fullname" . }}-frontend
+  labels:
+    {{- include "adf-accelerator.componentLabels" (dict "root" . "component" "frontend") | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "adf-accelerator.componentSelectorLabels" (dict "root" . "component" "frontend") | nindent 6 }}
+{{- end }}

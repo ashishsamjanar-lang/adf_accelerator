@@ -1,0 +1,13 @@
+# Direct runtime dependencies for the API service, in pip-compile input format.
+#
+# The ranges here must stay identical to pyproject.toml's `[project] dependencies` —
+# this file exists only so `requirements.txt` (the exact-pinned lock actually installed
+# in Docker/CI) can be regenerated mechanically instead of hand-edited. See "Dependency
+# pinning" in ../README.md before changing either file.
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic-settings>=2.6,<3
+sqlalchemy>=2.0,<3
+psycopg[binary]>=3.2,<4
+alembic>=1.14,<2
+cryptography>=43,<44

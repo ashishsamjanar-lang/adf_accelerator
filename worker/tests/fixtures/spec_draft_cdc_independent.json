@@ -1,0 +1,37 @@
+{
+  "name": "vendor_cdc",
+  "pattern": "independent_watermark",
+  "projectId": "proj-parity-test",
+  "templateId": "incremental_load",
+  "sourceType": "sql_server",
+  "sourceObject": "dbo.vendor",
+  "targetType": "azure_sql_database",
+  "targetPath": "raw",
+  "sourceObjectMode": "form",
+  "sourceObjects": [
+    {
+      "object": "dbo.vendor"
+    }
+  ],
+  "watermarkEnabled": true,
+  "watermarkType": "single",
+  "watermarkColumns": [
+    {
+      "name": "modified_date",
+      "type": "datetime",
+      "order": 1
+    }
+  ],
+  "watermarkTable": "control.vendor_watermark",
+  "watermarkInitialValue": "1900-01-01",
+  "loadTypeMode": "incremental",
+  "batchCount": 15,
+  "parallelCopies": 10,
+  "enableCopyLog": true,
+  "logLevel": "Info",
+  "sinkFileFormat": "Parquet",
+  "writeBehavior": "Upsert",
+  "upsertKeyColumns": "vendor_id, region",
+  "deleteHandling": "cdc",
+  "softDeleteColumn": "is_removed"
+}

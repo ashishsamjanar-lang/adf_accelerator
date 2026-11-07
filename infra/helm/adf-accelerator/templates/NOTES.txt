@@ -1,0 +1,37 @@
+ADF Forge ({{ .Release.Name }}) deployed to namespace {{ .Release.Namespace }}.
+
+{{- if .Values.ingress.enabled }}
+Frontend (Ingress):
+{{- if .Values.ingress.host }}
+  http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+  No ingress.host set — check `kubectl get ingress {{ include "adf-accelerator.fullname" . }} -n {{ .Release.Namespace }}` for the address your ingress controller assigned.
+{{- end }}
+{{- else }}
+Ingress is disabled. Reach the frontend with:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "adf-accelerator.fullname" . }}-frontend {{ .Values.frontend.service.port }}:{{ .Values.frontend.service.port }}
+{{- end }}
+
+Backend health check:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "adf-accelerator.fullname" . }}-backend {{ .Values.backend.service.port }}:{{ .Values.backend.service.port }}
+  curl http://localhost:{{ .Values.backend.service.port }}/health
+
+{{- if not .Values.secrets.create }}
+{{- if not .Values.secrets.existingSecret }}
+
+WARNING: secrets.create is false and secrets.existingSecret is unset — the
+backend/worker Deployments will fail to start (missing DATABASE_URL /
+GIT_TOKEN_FERNET_KEY). Set secrets.existingSecret to a Secret you manage
+yourself, or set secrets.create=true for a quick eval install. See this
+chart's README.md.
+{{- end }}
+{{- end }}
+
+{{- if eq .Values.config.authMode "mock" }}
+
+NOTE: config.authMode is "mock" — no authentication. Fine for a local/demo
+install; switch to "password" (or oidc/saml once implemented) before handing
+this to real users, and bootstrap the first admin with:
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "adf-accelerator.fullname" . }}-backend -- \
+    python -m app.manage create-platform-admin --email you@example.com --name "Your Name"
+{{- end }}

@@ -1,0 +1,13 @@
+# Direct runtime dependencies for the worker service, in pip-compile input format.
+#
+# The ranges here must stay identical to pyproject.toml's `[project] dependencies` —
+# this file exists only so `requirements.txt` (the exact-pinned lock actually installed
+# in Docker/CI) can be regenerated mechanically instead of hand-edited. See "Dependency
+# pinning" in ../README.md before changing either file.
+pydantic-settings>=2.6,<3
+jinja2>=3.1,<4
+sqlalchemy>=2.0,<3
+psycopg[binary]>=3.2,<4
+cryptography>=43,<44
+azure-identity>=1.17,<2
+azure-keyvault-secrets>=4.8,<5

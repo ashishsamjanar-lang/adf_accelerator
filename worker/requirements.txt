@@ -1,0 +1,17 @@
+# Exact-pinned lock for the worker service — this is what Dockerfile and CI actually
+# install, not pyproject.toml's floating ranges. Pinning direct dependencies to one
+# version means a rebuild next month resolves the same packages a rebuild today does,
+# instead of silently picking up whatever new release still satisfies `>=1.17,<2`, etc.
+#
+# Each version below is the newest release that satisfied its range in worker/pyproject.toml
+# at authoring time. Regenerate with `make lock` (pip-compile against requirements.in) whenever
+# pyproject.toml's ranges change, then let CI's `worker-requirements-lock-check` job prove the
+# new pins actually install and the app still imports before merging. See "Dependency pinning"
+# in ../README.md.
+pydantic-settings==2.6.1
+jinja2==3.1.4
+sqlalchemy==2.0.36
+psycopg[binary]==3.2.3
+cryptography==43.0.3
+azure-identity==1.19.0
+azure-keyvault-secrets==4.9.0

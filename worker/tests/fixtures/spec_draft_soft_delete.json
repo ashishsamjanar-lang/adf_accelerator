@@ -1,0 +1,58 @@
+{
+  "name": "customer_soft_delete",
+  "projectId": "proj-parity-test",
+  "templateId": "incremental_load",
+  "sourceType": "sql_server",
+  "sourceObject": "dbo.customer",
+  "targetType": "azure_sql_database",
+  "targetPath": "raw",
+  "sourceObjectMode": "form",
+  "sourceObjects": [
+    {
+      "object": "dbo.customer",
+      "watermarkColumn": "modified_date"
+    },
+    {
+      "object": "dbo.orders",
+      "watermarkColumn": "updated_at"
+    }
+  ],
+  "watermarkEnabled": true,
+  "watermarkType": "single",
+  "watermarkColumns": [
+    {
+      "name": "modified_date",
+      "type": "datetime",
+      "order": 1
+    }
+  ],
+  "watermarkTable": "control.watermarks",
+  "watermarkInitialValue": "1900-01-01",
+  "loadTypeMode": "incremental",
+  "masterChildPattern": true,
+  "isSequential": false,
+  "batchCount": 10,
+  "parallelCopies": 8,
+  "dataIntegrationUnits": 4,
+  "retryCount": 2,
+  "retryIntervalInSeconds": 15,
+  "enableCopyLog": true,
+  "logLevel": "Info",
+  "enableAzureMonitor": true,
+  "notifyOnSuccess": false,
+  "notifyOnFailure": true,
+  "notificationEmails": [
+    "data-eng@example.com"
+  ],
+  "triggerEnabled": true,
+  "triggerType": "schedule",
+  "triggerFrequency": "Day",
+  "triggerInterval": 1,
+  "triggerStartTime": "2026-01-01T02:00:00Z",
+  "triggerTimeZone": "UTC",
+  "sinkFileFormat": "Parquet",
+  "copyBehavior": "PreserveHierarchy",
+  "writeBehavior": "Upsert",
+  "upsertKeyColumns": "customer_id",
+  "deleteHandling": "soft_delete"
+}

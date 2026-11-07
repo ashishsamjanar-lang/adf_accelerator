@@ -1,0 +1,9 @@
+apiVersion: v2
+name: adf-accelerator
+description: >-
+  ADF Forge application (frontend/backend/worker) — cloud-agnostic Kubernetes
+  packaging. Deploys the app only; Postgres and secret storage are bring-your-own,
+  same boundary as infra/main.bicep (see infra/README.md and this chart's README.md).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

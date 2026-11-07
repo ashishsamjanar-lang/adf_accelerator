@@ -1,0 +1,6 @@
+# Adds the `test` extra from pyproject.toml on top of the runtime deps above.
+# Used for local dev, CI test jobs, and the requirements-lock-check CI job — never
+# baked into the deployed image (Dockerfile installs requirements.txt only).
+-r requirements.in
+pytest>=8,<9
+httpx>=0.27,<1

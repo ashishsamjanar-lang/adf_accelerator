@@ -1,0 +1,606 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Legacy Policy Admin Migration — Implementation Guide</title>
+<link rel="stylesheet" href="guide.css" />
+</head>
+<body>
+<div class="doc-shell">
+
+  <div class="doc-masthead">
+    <span class="doc-eyebrow">📦 Sample project 1 · Legacy migration</span>
+    <h1>Retiring the legacy Policy Administration System into the Enterprise Lakehouse</h1>
+    <p class="doc-sub">
+      A worked, enterprise-grade reference implementation for migrating one legacy on-premises source
+      (a 20-year-old SQL Server "Policy Admin" system plus its nightly flat-file exports) into governed
+      lake and warehouse targets — built end-to-end with <strong>ADF Forge</strong> and shipped through a
+      real dev → test → prod CI/CD pipeline. Use it as the pattern for any legacy-to-target migration.
+    </p>
+    <div class="doc-badges">
+      <span class="pill pill-teal">Built with ADF Forge</span>
+      <span class="pill">Full + Incremental load</span>
+      <span class="pill">Daily · Hourly · Near-real-time</span>
+      <span class="pill">Chunked high-volume loads</span>
+      <span class="pill pill-green">Standard metadata &amp; logging</span>
+      <span class="pill pill-amber">End-to-end CI/CD</span>
+    </div>
+  </div>
+
+  <nav class="doc-toc">
+    <span class="toc-title">On this page</span>
+    <a href="#problem">1. Define the problem</a>
+    <a class="sub" href="#problem-context">Business &amp; technical context</a>
+    <a class="sub" href="#problem-goals">Goals &amp; success criteria</a>
+    <a href="#approach">2. Approach</a>
+    <a class="sub" href="#approach-architecture">Target architecture</a>
+    <a class="sub" href="#approach-forge">Where ADF Forge fits</a>
+    <a class="sub" href="#approach-impact">Impact on development</a>
+    <a class="sub" href="#approach-cicd">CI/CD strategy</a>
+    <a href="#implementation">3. Implementation</a>
+    <a class="sub" href="#impl-inventory">Source inventory &amp; load design</a>
+    <a class="sub" href="#impl-chunking">High-volume load: chunking &amp; parallelism</a>
+    <a class="sub" href="#impl-folders">Standard folder structure</a>
+    <a class="sub" href="#impl-target-naming">Target table &amp; file naming</a>
+    <a class="sub" href="#impl-metadata">Standard metadata columns</a>
+    <a class="sub" href="#impl-logging">Standard logging</a>
+    <a class="sub" href="#impl-dq">Data quality checks</a>
+    <a class="sub" href="#impl-triggers">Trigger &amp; cadence design</a>
+    <a class="sub" href="#impl-orchestration">Orchestration design</a>
+    <a class="sub" href="#impl-walkthrough">Built with ADF Forge — step by step</a>
+    <a class="sub" href="#impl-cicd">CI/CD pipeline, stage by stage</a>
+    <a class="sub" href="#impl-control-promotion">Promoting onboarded source &amp; control-table metadata</a>
+    <a class="sub" href="#impl-cutover">Governance, cutover &amp; rollback</a>
+  </nav>
+
+  <main class="doc-body">
+
+    <!-- ============================= 1. PROBLEM ============================= -->
+    <section class="doc-section" id="problem">
+      <h2><span class="step-num">1</span>Define the problem</h2>
+      <p class="doc-lede">
+        Before any pipeline gets built, the reference project starts by writing down exactly what is
+        broken today and what "done" looks like — the same discipline any real onboarding should apply
+        before opening ADF Forge's Build wizard.
+      </p>
+
+      <h3 id="problem-context">Business &amp; technical context</h3>
+      <p>
+        <strong>Legacy Policy Administration System (PAS)</strong> is an on-premises SQL Server 2008 R2
+        instance that has run the insurer's policy, endorsement and claims-intake data since 2005. It is
+        the system of record for 40+ tables and also drops three nightly flat-file exports (agent
+        commission statements) onto a Windows file share for a downstream finance job. It must be
+        decommissioned within 12 months as part of the platform's cloud migration, but every downstream
+        report, the actuarial data mart, and two partner data-sharing feeds depend on its data.
+      </p>
+      <div class="grid-cards cols-2">
+        <div class="mini-card">
+          <strong>Pain points today</strong>
+          <span>
+            One monolithic nightly batch job (4+ hours) with no restart/checkpoint; every load is a
+            full truncate-and-reload, even for a 200M-row claims table; no incremental capability; no
+            per-run audit trail; connection strings and credentials hardcoded in SSIS packages; no
+            naming or folder convention — new packages are copy-pasted and drift over time.
+          </span>
+        </div>
+        <div class="mini-card">
+          <strong>Compliance &amp; risk exposure</strong>
+          <span>
+            No column-level lineage from source to mart, which fails the insurer's most recent SOX
+            data-lineage audit finding. No row-level change history (regulator requires 7-year policy
+            history, not just current state). No structured error/rejection log — failures are found by
+            downstream teams noticing missing rows, days later.
+          </span>
+        </div>
+      </div>
+
+      <h3 id="problem-goals">Goals &amp; success criteria</h3>
+      <ul>
+        <li><strong>Parity load types</strong> — every table supports both a Full Load (initial seed / re-seed) and an Incremental/Delta load (ongoing), chosen per table by volume and change rate, not a one-size-fits-all job.</li>
+        <li><strong>Cadence that matches the business need</strong> — most reference/dimension tables move daily; high-churn claims tables move hourly; the claims-intake event feed that underwrites same-day fraud scoring moves near-real-time.</li>
+        <li><strong>One metadata contract</strong> — every landed row carries the same audit/lineage columns regardless of source table, satisfying the lineage audit finding without a bespoke solution per table.</li>
+        <li><strong>Standard, structured logging</strong> — a single execution log the platform team can alert on, instead of tribal knowledge about which job silently failed.</li>
+        <li><strong>A governed path to production</strong> — nothing reaches the customer's ADF factory without validation, peer review (PR) and a controlled, auditable deployment — never a hand-run script against prod.</li>
+        <li><strong>Faster to build than the legacy job was to maintain</strong> — onboarding a new PAS table should be an hour of configuration, not a new hand-written SSIS package.</li>
+      </ul>
+    </section>
+
+    <!-- ============================= 2. APPROACH ============================= -->
+    <section class="doc-section" id="approach">
+      <h2><span class="step-num">2</span>Approach</h2>
+      <p class="doc-lede">
+        Land everything into a governed medallion lake first, curate into the reporting warehouse
+        second, and never write pipeline code by hand — author every artifact through ADF Forge's
+        metadata-driven Build form so the generated ADF JSON is consistent and pre-validated by
+        construction.
+      </p>
+
+      <h3 id="approach-architecture">Target architecture</h3>
+      <div class="flow">
+        <div class="flow-node">
+          <span class="fn-eyebrow">Source</span>
+          <strong>Legacy PAS</strong>
+          <span class="fn-body">SQL Server 2008 R2 (40+ tables) + 3 nightly CSV exports on a file share</span>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent">
+          <span class="fn-eyebrow">Landing / Raw</span>
+          <strong>ADLS Gen2 — raw zone</strong>
+          <span class="fn-body">Parquet, one folder per table/date, append-only, untouched copy of source</span>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent">
+          <span class="fn-eyebrow">Bronze / Curated files</span>
+          <strong>ADLS Gen2 — curated zone</strong>
+          <span class="fn-body">Delta/Parquet, metadata columns applied, SCD2 history for policy tables</span>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">
+          <span class="fn-eyebrow">Gold / Marts</span>
+          <strong>Azure Synapse dedicated pool tables</strong>
+          <span class="fn-body">Curated star-schema tables the actuarial mart and partner feeds read from</span>
+        </div>
+      </div>
+      <p>
+        Every hop above is a pipeline generated by ADF Forge — nothing here is a manual copy job. The
+        raw and curated zones exist so a downstream consumer never depends on a mutable "latest state
+        only" copy: raw is the immutable audit copy, curated carries type-2 history for anything the
+        regulator needs 7 years of.
+      </p>
+
+      <h3 id="approach-forge">Where ADF Forge fits</h3>
+      <div class="callout callout-forge">
+        <span class="callout-icon">⚙</span>
+        <div>
+          <strong>ADF Forge is the authoring and governance layer, not the runtime</strong>
+          <p>
+            ADF (the customer's own Data Factory) is what actually executes copy activities and data
+            flows against PAS and the lake/warehouse. ADF Forge is the control plane the migration team
+            uses to <em>design, validate, and ship</em> those pipelines as Git-tracked artifacts — it never
+            runs a pipeline or reaches into PAS itself.
+          </p>
+        </div>
+      </div>
+      <ol>
+        <li>
+          <strong>Onboarding.</strong> The 40+ PAS tables and 3 export files are registered once in
+          <code class="inline">Delivery → Onboarding</code>, via a single CSV import (object name, target
+          table, file format, load behaviour, watermark column) rather than 43 separate conversations.
+          This becomes the control-table seed and pre-fills Build's source-object list.
+        </li>
+        <li>
+          <strong>Connections.</strong> Two linked services are saved once in
+          <code class="inline">Delivery → Connections</code>: <em>PAS-SQLServer-OnPrem</em> (SQL Server
+          connector, self-hosted integration runtime, Windows auth via a Key Vault secret reference) and
+          <em>PAS-FileShare-SFTP</em> for the three exports — plus the ADLS Gen2 and Synapse targets.
+          Every pipeline below picks these from a list instead of re-typing connection details.
+        </li>
+        <li>
+          <strong>Build.</strong> Each table's pipeline is authored in
+          <code class="inline">Delivery → Build → Pipeline</code>: the 5-step wizard (Basics → Source →
+          Target → Pipeline Settings → Review &amp; Generate) picks the generation template — Full Load
+          for the 9 small reference tables, Incremental/Delta (watermark) for the 24 transactional
+          tables, Composite Watermark for the 3 tables with multi-column change tracking, and a single
+          Metadata-Driven pipeline for the remaining long-tail objects — so one generic pipeline, not 40
+          bespoke ones, drives most of the load.
+        </li>
+        <li>
+          <strong>Standards.</strong> Naming (<code class="inline">pl_pas_&lt;object&gt;_&lt;load&gt;</code>),
+          required tags (<code class="inline">data-domain</code>, <code class="inline">pii</code>,
+          <code class="inline">source-system</code>), and the always-on "secrets as Key Vault reference
+          only" rule are enforced at <code class="inline">Block</code> before anything reaches Validate —
+          closing the exact hardcoded-credential problem the legacy SSIS packages had.
+        </li>
+        <li>
+          <strong>Validate → Push to Git → PR.</strong> Generated artifacts are checked against ADF
+          schema and the Standards policy, then pushed to a feature branch
+          (<code class="inline">feature/pas-migration-&lt;object&gt;</code>) and opened as a pull request
+          into <code class="inline">dev</code>. ADF Forge never pushes to <code class="inline">dev</code>
+          directly, and never deploys anywhere — the PR merge is the handoff into the CI/CD pipeline
+          described below.
+        </li>
+      </ol>
+
+      <h3 id="approach-impact">Impact on development</h3>
+      <p>
+        This is the part that actually changes how the migration team works day to day, compared with
+        hand-authoring ADF pipelines or maintaining the legacy SSIS packages:
+      </p>
+      <div class="grid-cards cols-2">
+        <div class="mini-card">
+          <strong>Before ADF Forge</strong>
+          <span>
+            A new table onboarding meant a developer hand-writing pipeline JSON (or an SSIS package),
+            manually wiring linked services, guessing at a naming convention, and getting it reviewed
+            for secrets-in-code and schema mistakes after the fact — typically 1–3 days per object, with
+            drift between authors.
+          </span>
+        </div>
+        <div class="mini-card">
+          <strong>With ADF Forge</strong>
+          <span>
+            The same table is a schema-rendered form: pick the connection, pick the template, set the
+            watermark column, hit Generate. Naming, tagging, and the Key-Vault-only secret rule are
+            enforced automatically. Typical time per object: <strong>30–60 minutes</strong>, and every
+            object produced is structurally identical to every other one.
+          </span>
+        </div>
+      </div>
+      <ul>
+        <li><strong>No per-connector hand-written forms</strong> — the connector registry already knows what fields SQL Server, SFTP, ADLS Gen2 and Synapse each need, so the same wizard is reused for all 43 objects.</li>
+        <li><strong>Errors caught before Git, not in production</strong> — Validate runs ADF schema checks and Standards policy before a PR can even be opened, so code review focuses on business logic (is the watermark column right?) not boilerplate (is the secret hardcoded?).</li>
+        <li><strong>One reviewable diff per object</strong> — Git is the system of record for every artifact; a reviewer sees exactly what changed, and the commit is traceable back to the spec version that generated it (visible in <code class="inline">Delivery → Git</code>).</li>
+        <li><strong>Parallel team throughput</strong> — because the wizard doesn't require deep ADF authoring expertise, three migration engineers onboard tables in parallel without stepping on each other's hand-written JSON.</li>
+      </ul>
+
+      <h3 id="approach-cicd">CI/CD strategy</h3>
+      <p>
+        ADF Forge's job ends at the pull request into <code class="inline">dev</code> — it has
+        <strong>no release or deployment UI</strong> by design. Everything from "PR merged" to "running
+        in the customer's Prod Data Factory" is a standard, tool-agnostic ADF CI/CD pipeline living in
+        the same Git repository the artifacts were pushed to, using Microsoft's documented ARM-template
+        export/deploy pattern. The high-level promotion model:
+      </p>
+      <div class="flow">
+        <div class="flow-node"><span class="fn-eyebrow">1</span><strong>PR → dev merge</strong><span class="fn-body">Triggers the pipeline; nothing is deployed on Push to a feature branch</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent"><span class="fn-eyebrow">2</span><strong>Build &amp; validate</strong><span class="fn-body">ADF utilities export ARM templates from the "collaboration branch" (dev)</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node"><span class="fn-eyebrow">3</span><strong>Deploy Dev</strong><span class="fn-body">Auto-deploy the ARM package to the Dev factory</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node"><span class="fn-eyebrow">4</span><strong>Deploy Test</strong><span class="fn-body">Same package, gated on QA sign-off</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent"><span class="fn-eyebrow">5</span><strong>Deploy Prod</strong><span class="fn-body">Same package, gated on change approval</span></div>
+      </div>
+      <p>Full stage-by-stage detail, including the exact pipeline YAML shape, is in <a href="#impl-cicd">Implementation → CI/CD pipeline</a>.</p>
+    </section>
+
+    <!-- ============================= 3. IMPLEMENTATION ============================= -->
+    <section class="doc-section" id="implementation">
+      <h2><span class="step-num">3</span>Implementation</h2>
+
+      <h3 id="impl-inventory">Source inventory &amp; load design</h3>
+      <p>A representative slice of the 43-object inventory registered in Onboarding — the full sheet drives the same pattern across every object:</p>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Source object</th><th>Type</th><th>Target</th><th>Load</th><th>Cadence</th><th>Watermark / key</th></tr></thead>
+          <tbody>
+            <tr><td>dbo.PolicyMaster</td><td>Table (12M rows)</td><td>curated.policy</td><td><span class="chip chip-full">Full</span> seed, then <span class="chip chip-incr">Incr.</span></td><td><span class="chip chip-daily">Daily</span></td><td><code class="inline">last_modified_dt</code></td></tr>
+            <tr><td>dbo.ClaimsIntake</td><td>Table (210M rows)</td><td>curated.claims</td><td><span class="chip chip-incr">Incremental</span></td><td><span class="chip chip-hourly">Hourly</span></td><td><code class="inline">rowversion</code></td></tr>
+            <tr><td>dbo.ClaimsFraudEvent</td><td>Table (event stream)</td><td>curated.claims_fraud_event</td><td><span class="chip chip-incr">Incremental</span></td><td><span class="chip chip-nrt">Near-real-time</span> (5 min tumbling window)</td><td><code class="inline">event_ts</code> + <code class="inline">event_id</code></td></tr>
+            <tr><td>dbo.Endorsement</td><td>Table (38M rows)</td><td>curated.endorsement</td><td><span class="chip chip-incr">Incremental</span></td><td><span class="chip chip-hourly">Hourly</span></td><td><code class="inline">updated_at</code>, <code class="inline">endorsement_id</code> (composite)</td></tr>
+            <tr><td>dbo.AgentRef, dbo.ProductRef, dbo.RegionRef …(9 tables)</td><td>Table (&lt;50K rows each)</td><td>curated.ref_*</td><td><span class="chip chip-full">Full</span> (truncate/reload)</td><td><span class="chip chip-daily">Daily</span></td><td>n/a — full snapshot</td></tr>
+            <tr><td>AgentCommission_*.csv (3 files/night)</td><td>File — pipe-delimited CSV</td><td>curated.agent_commission</td><td><span class="chip chip-full">Full</span> (append, dated partitions)</td><td><span class="chip chip-daily">Daily</span> (file-arrival event)</td><td>filename date + row hash (dedupe)</td></tr>
+            <tr><td>Remaining 28 long-tail tables</td><td>Table</td><td>curated.* (metadata-driven)</td><td>Mixed, per control-table row</td><td><span class="chip chip-daily">Daily</span></td><td>Per control-table row</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Rule of thumb applied consistently: <strong>Full Load</strong> for anything under ~1M rows that's
+        cheap to re-snapshot; <strong>Incremental/Delta</strong> for anything larger or append-mostly;
+        <strong>near-real-time</strong> reserved for the one feed with a genuine same-day business need
+        (fraud scoring) — not applied everywhere by default, since polling every table every 5 minutes
+        would just move the legacy system's "run everything, all the time" problem onto the new platform.
+      </p>
+
+      <h3 id="impl-chunking">High-volume load: chunking &amp; parallel extraction</h3>
+      <p>
+        The 210M-row <code class="inline">dbo.ClaimsIntake</code> table is too large to move as a
+        single Copy activity for its historical seed — one long-running query against PAS risks lock
+        contention with the 40 other tables sharing that SQL Server, a multi-hour activity with no
+        restart point, and a 210M-row merge into curated as one all-or-nothing transaction. The Initial
+        Load template's <em>chunking</em> option splits the one-time historical backfill into bounded,
+        independently restartable pieces instead.
+      </p>
+      <div class="flow">
+        <div class="flow-node"><span class="fn-eyebrow">1</span><strong>Chunk-plan control table</strong><span class="fn-body">A one-time stored proc divides the row range into ~21 chunks of ~10M rows on <code class="inline">claim_id</code></span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent"><span class="fn-eyebrow">2</span><strong>Lookup + ForEach</strong><span class="fn-body">Orchestrator reads the chunk plan; ForEach runs with <code class="inline">batchCount = 5</code>, not sequential</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent"><span class="fn-eyebrow">3</span><strong>Copy per chunk</strong><span class="fn-body">Dynamic range partition on <code class="inline">claim_id</code>, parallel copies 8, writes to its own raw-zone chunk file</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node"><span class="fn-eyebrow">4</span><strong>Merge to curated</strong><span class="fn-body">One idempotent upsert (merge on <code class="inline">claim_id</code>) once every chunk reports <code class="inline">SUCCEEDED</code></span></div>
+      </div>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Chunk</th><th>Range (claim_id)</th><th>Est. rows</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr><td>chunk_01</td><td>1 – 10,000,000</td><td>~9.8M</td><td><span class="chip chip-incr">SUCCEEDED</span></td></tr>
+            <tr><td>chunk_02</td><td>10,000,001 – 20,000,000</td><td>~10.1M</td><td><span class="chip chip-incr">SUCCEEDED</span></td></tr>
+            <tr><td>…</td><td>…</td><td>…</td><td>…</td></tr>
+            <tr><td>chunk_14</td><td>130,000,001 – 140,000,000</td><td>~9.9M</td><td><span class="chip chip-nrt">FAILED — retrying</span></td></tr>
+            <tr><td>chunk_21</td><td>200,000,001 – 210,400,000</td><td>~10.4M</td><td><span class="chip chip-full">PENDING</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li><strong>Restartable by chunk, not by table:</strong> the chunk-control table tracks per-chunk status; a re-run of the orchestrator skips every chunk already <code class="inline">SUCCEEDED</code> and retries only <code class="inline">FAILED</code>/<code class="inline">PENDING</code> ones — chunk_14 failing on a transient IR timeout doesn't cost re-copying the other 20 chunks.</li>
+        <li><strong>Bounded parallelism, not maximum parallelism:</strong> <code class="inline">batchCount = 5</code> caps how many chunks run concurrently against PAS's self-hosted IR gateway — enough to finish the 210M-row seed inside a single maintenance window without saturating the on-prem SQL Server that 40 other tables also depend on.</li>
+        <li><strong>Built in the same Build wizard:</strong> Pipeline Settings exposes a <em>Partition &amp; chunking</em> group for the Initial Load template — partition column, target chunk size (rows), and max parallel chunks — generated as the Lookup / ForEach / Copy shape above, not hand-authored.</li>
+        <li><strong>One-time, then it's Incremental:</strong> once the chunked seed completes and reconciles, <code class="inline">dbo.ClaimsIntake</code> hands off permanently to the hourly Incremental/Delta pipeline already in the inventory table above — chunking only applies to the historical backfill, never to the steady-state hourly load.</li>
+      </ul>
+      <div class="callout callout-risk">
+        <span class="callout-icon">!</span>
+        <div>
+          <strong>Why not one big Copy activity with "parallel copies" just turned up?</strong>
+          <p>Parallel copies alone (used for the steady-state hourly load) parallelizes <em>within</em> one activity run but the run still fails or succeeds atomically — a network blip at row 190M restarts the whole 210M-row extract. Chunking makes each ~10M-row slice its own restart unit, which is what actually matters for a one-time historical seed this large.</p>
+        </div>
+      </div>
+
+      <h3 id="impl-folders">Standard folder structure</h3>
+      <p>Applied identically across the raw zone, curated zone, and the Git artifacts repository ADF Forge pushes into, so any engineer can find any object the same way regardless of source:</p>
+      <div class="doc-code">adls://lake/
+  raw/pas/&lt;object&gt;/ingest_date=YYYY-MM-DD/*.parquet
+  curated/pas/&lt;object&gt;/                       # Delta table, SCD2 where applicable
+  rejects/pas/&lt;object&gt;/ingest_date=YYYY-MM-DD/*.parquet
+  archive/pas/&lt;object&gt;/year=YYYY/month=MM/
+
+git-repo (ADF Forge managed, per §24.11 folder order)
+  linkedService/            PAS-SQLServer-OnPrem.json, PAS-FileShare-SFTP.json, Lake-ADLS.json, Mart-Synapse.json
+  dataset/                  ds_pas_&lt;object&gt;_src.json, ds_curated_&lt;object&gt;_tgt.json
+  pipeline/
+    pl_pas_&lt;object&gt;_full.json
+    pl_pas_&lt;object&gt;_incr.json
+    pl_pas_orchestrator_daily.json      # master/child for the daily batch
+    pl_pas_orchestrator_hourly.json
+    pl_pas_claimsfraud_nrt.json
+  trigger/                 tr_pas_daily_0200.json, tr_pas_hourly.json, tr_pas_claimsfraud_tumbling5m.json
+  parameter/                pas_global_parameters.json</div>
+
+      <h3 id="impl-target-naming">Target table &amp; file naming standardization</h3>
+      <p>
+        The 43 objects land in only two kinds of destination — a curated lake table or a warehouse mart
+        table — plus the archive/reject files the folder structure above already partitions by date. Each
+        gets one fixed naming pattern, built from the same <code class="inline">{source}/{object}</code>
+        tokens as the pipeline naming pattern, so a target name
+        is never separately invented per object:
+      </p>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Target kind</th><th>Pattern</th><th>Example</th></tr></thead>
+          <tbody>
+            <tr><td>Lake curated table</td><td><code class="inline">curated.&lt;object:snake&gt;</code></td><td><code class="inline">curated.policy</code>, <code class="inline">curated.claims_fraud_event</code></td></tr>
+            <tr><td>Warehouse mart table</td><td><code class="inline">mart.&lt;domain:lower&gt;_&lt;object:snake&gt;</code></td><td><code class="inline">mart.claims_fact</code>, <code class="inline">mart.policy_dim</code></td></tr>
+            <tr><td>Archive / reject file</td><td><code class="inline">&lt;object&gt;/ingest_date=YYYY-MM-DD/&lt;object&gt;_&lt;yyyyMMdd_HHmmss&gt;.parquet</code></td><td><code class="inline">claims/ingest_date=2026-09-12/claims_20260912_020000.parquet</code></td></tr>
+            <tr><td>SOX audit export file</td><td><code class="inline">&lt;object&gt;_&lt;yyyyMMdd&gt;_audit.csv</code></td><td><code class="inline">policymaster_20260912_audit.csv</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The target table (or target file) name is a field on each object's Onboarding row (§26.2),
+        pre-filled from the pattern the moment the source object name is entered, and it round-trips into
+        the generated dataset's physical name in Build's Target step — an author picks the connection, not
+        a naming scheme. It's checked at the same <code class="inline">warn</code>/<code class="inline">block</code>
+        enforcement points as pipeline names (Onboarding/Build inline, Validate, and the pre-push hard gate),
+        so <code class="inline">curated.PolicyMASTER</code> or a table dropped straight in the schema root
+        with no zone prefix is caught before a PR is even opened, not discovered by the next engineer who
+        goes looking for it.
+      </p>
+
+      <h3 id="impl-metadata">Standard metadata columns</h3>
+      <p>Every curated row — regardless of which of the 43 objects it came from — carries the same audit/lineage contract. This is what closes the SOX lineage-audit gap without a bespoke solution per table:</p>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Column</th><th>Type</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code class="inline">_source_system</code></td><td>string</td><td>Fixed value <code class="inline">PAS</code> — which system this row originated from.</td></tr>
+            <tr><td><code class="inline">_source_object</code></td><td>string</td><td>Source table/file name, e.g. <code class="inline">dbo.PolicyMaster</code>.</td></tr>
+            <tr><td><code class="inline">_pipeline_run_id</code></td><td>guid</td><td>The ADF pipeline run ID that produced this row — joins back to the execution log.</td></tr>
+            <tr><td><code class="inline">_batch_id</code></td><td>string</td><td>Business batch/date key (e.g. <code class="inline">2026-09-12-D1</code>) — groups rows from the same logical load, independent of retries.</td></tr>
+            <tr><td><code class="inline">_ingestion_ts_utc</code></td><td>datetime2</td><td>When the row was written to the curated zone (UTC, always).</td></tr>
+            <tr><td><code class="inline">_source_row_hash</code></td><td>string (sha256)</td><td>Hash of business columns — cheap change detection and exact-duplicate dedupe.</td></tr>
+            <tr><td><code class="inline">_watermark_value</code></td><td>string</td><td>The watermark value read for this row's extraction window (audit of what "incremental" actually captured).</td></tr>
+            <tr><td><code class="inline">_is_current</code></td><td>boolean</td><td>SCD2 flag — true for the current version of the row (policy/endorsement tables only).</td></tr>
+            <tr><td><code class="inline">_valid_from</code> / <code class="inline">_valid_to</code></td><td>datetime2</td><td>SCD2 validity window — satisfies the 7-year policy-history retention requirement.</td></tr>
+            <tr><td><code class="inline">_dq_status</code></td><td>string</td><td><code class="inline">PASS</code> / <code class="inline">WARN</code> / <code class="inline">REJECTED</code> from schema/null-check validation applied on landing.</td></tr>
+            <tr><td><code class="inline">_load_type</code></td><td>string</td><td><code class="inline">FULL</code> or <code class="inline">INCREMENTAL</code> — which pipeline template produced the row.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>These are configured once as project-level custom metadata columns in <code class="inline">Project Settings → Metadata &amp; parameters</code>, so every pipeline generated by Build applies them automatically — an author never re-types this list.</p>
+
+      <h3 id="impl-logging">Standard logging</h3>
+      <p>
+        Every generated pipeline writes to one shared execution log — a plain SQL control table the
+        Standards policy requires (<code class="inline">Runtime</code> category, minimum-logging rule set
+        to <code class="inline">Block</code>), plus Azure Monitor diagnostic logging turned on for every
+        Data Factory instance:
+      </p>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Column</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code class="inline">run_id</code></td><td>ADF pipeline run ID (primary key)</td></tr>
+            <tr><td><code class="inline">pipeline_name</code></td><td>e.g. <code class="inline">pl_pas_claimsintake_incr</code></td></tr>
+            <tr><td><code class="inline">source_object</code> / <code class="inline">target_object</code></td><td>What was read / written</td></tr>
+            <tr><td><code class="inline">load_type</code></td><td><code class="inline">FULL</code> / <code class="inline">INCREMENTAL</code></td></tr>
+            <tr><td><code class="inline">start_time_utc</code> / <code class="inline">end_time_utc</code></td><td>Wall-clock window of the run</td></tr>
+            <tr><td><code class="inline">rows_read</code> / <code class="inline">rows_written</code> / <code class="inline">rows_rejected</code></td><td>Row-level accounting per run</td></tr>
+            <tr><td><code class="inline">watermark_start</code> / <code class="inline">watermark_end</code></td><td>Incremental window actually processed</td></tr>
+            <tr><td><code class="inline">status</code></td><td><code class="inline">SUCCEEDED</code> / <code class="inline">FAILED</code> / <code class="inline">SUCCEEDED_WITH_WARNINGS</code></td></tr>
+            <tr><td><code class="inline">error_message</code></td><td>Populated only on failure — the actual ADF activity error, not a generic message</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        This table is configured once in <code class="inline">Project Settings → ADF defaults</code> (the
+        logging connection + log level) and surfaces per-pipeline in Build's Pipeline Settings step
+        ("Azure Monitor logging + custom log columns") — an author opts a pipeline into the standard
+        log, never invents a new one. On-call is alerted from Azure Monitor on any
+        <code class="inline">status = FAILED</code> row within 2 minutes, replacing the legacy job's
+        "someone notices missing data" failure mode.
+      </p>
+
+      <h3 id="impl-dq">Data quality checks</h3>
+      <p>
+        The <code class="inline">_dq_status</code> column above records the outcome; these are the checks that
+        actually set it. Each is authored as a data quality rule on the object in Build's Pipeline Settings
+        step — up to 5 per pipeline, each becoming a real
+        pre-copy Lookup activity in the generated child pipeline, not a hand-written validation script:
+      </p>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Object</th><th>Rule</th><th>Config</th><th>Enforcement</th><th>Generated as</th></tr></thead>
+          <tbody>
+            <tr><td><code class="inline">PolicyMaster</code></td><td><code class="inline">IS_NOT_NULL</code></td><td>column <code class="inline">PolicyNumber</code></td><td><span class="pill pill-amber">Block</span></td><td><code class="inline">DQ_policy_number_required_Check</code> (Lookup) → <code class="inline">DQ_policy_number_required_Gate</code> (IfCondition → Fail)</td></tr>
+            <tr><td><code class="inline">PolicyMaster</code></td><td><code class="inline">UNIQUE</code></td><td>column <code class="inline">PolicyNumber</code></td><td><span class="pill">Warn</span></td><td><code class="inline">DQ_policy_number_unique_Check</code> only — a duplicate is visible in the run's <code class="inline">ViolationCount</code> output, not a hard stop, since the upsert write behavior already self-heals a re-run</td></tr>
+            <tr><td><code class="inline">PolicyMaster</code></td><td><code class="inline">LENGTH_LE</code></td><td>column <code class="inline">StateCode</code>, value <code class="inline">2</code></td><td><span class="pill">Warn</span></td><td>Same Lookup-only shape, catching a malformed state code before it reaches the mart dimension</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        This app never runs the check itself or inspects PAS's live data (§30.3's scope boundary) — the
+        Lookup activity's SQL runs in ADF, at execution time, exactly like every other generated activity.
+        <code class="inline">Block</code> is itself a Standards enforcement level (§25.2), so an org can make
+        "primary key not-null, blocking" a required policy rule rather than a per-pipeline preference.
+      </p>
+
+      <h3 id="impl-triggers">Trigger &amp; cadence design</h3>
+      <div class="grid-cards cols-3">
+        <div class="mini-card"><strong><span class="chip chip-daily">Daily</span> — reference &amp; low-churn tables</strong><span>Schedule trigger, 02:00 UTC, after the legacy PAS nightly batch window closes. 9 reference tables + 28 long-tail objects.</span></div>
+        <div class="mini-card"><strong><span class="chip chip-hourly">Hourly</span> — transactional tables</strong><span>Tumbling window trigger, 60-minute window with a 15-minute delay for late-arriving rows. ClaimsIntake, Endorsement.</span></div>
+        <div class="mini-card"><strong><span class="chip chip-nrt">Near-real-time</span> — fraud event feed</strong><span>Tumbling window trigger, 5-minute window, self-hosted IR polling a change-tracking table; storage-event trigger option evaluated but rejected — see note below.</span></div>
+      </div>
+      <div class="callout callout-risk">
+        <span class="callout-icon">!</span>
+        <div>
+          <strong>Why "near-real-time" here means a 5-minute tumbling window, not literal streaming</strong>
+          <p>ADF has no native sub-minute streaming primitive; a 5-minute tumbling-window trigger against SQL Server change tracking meets the actual business SLA (fraud scoring within 15 minutes of a claim event) without introducing a separate streaming platform (Event Hubs/Stream Analytics) that this migration doesn't otherwise need. Guide 2 covers a scenario where a real event-streaming source is already in play.</p>
+        </div>
+      </div>
+
+      <h3 id="impl-orchestration">Orchestration design</h3>
+      <p>
+        Three separate orchestration shapes cover the 43 objects — chosen per the same rule as load
+        type and cadence: don't force one pattern where it doesn't fit the object's actual dependency
+        and concurrency needs.
+      </p>
+      <div class="grid-cards cols-3">
+        <div class="mini-card">
+          <strong>Master/child — daily batch</strong>
+          <span><code class="inline">pl_pas_orchestrator_daily.json</code> Lookup-reads the control table for objects due today, then <code class="inline">ForEach</code> (<code class="inline">batchCount = 6</code>) fans out an <code class="inline">Execute Pipeline</code> activity per object, wait-on-completion, with the object's parameters (table name, watermark column, load type). 37 child pipelines, one orchestrator.</span>
+        </div>
+        <div class="mini-card">
+          <strong>Independent — hot hourly tables</strong>
+          <span><code class="inline">ClaimsIntake</code> and <code class="inline">Endorsement</code> each run as their own tumbling-window pipeline, deliberately outside the master/child tree — one hot table stalling never blocks the other 41 objects, and vice versa.</span>
+        </div>
+        <div class="mini-card">
+          <strong>Chunked — one-time historical seed</strong>
+          <span>The high-volume chunking shape above (Lookup → ForEach over the chunk-plan table → Copy per chunk → merge) runs once per table needing a large backfill, then is retired in favour of the object's normal load pattern.</span>
+        </div>
+      </div>
+      <div class="flow">
+        <div class="flow-node"><span class="fn-eyebrow">Orchestrator</span><strong>pl_pas_orchestrator_daily</strong><span class="fn-body">Lookup control table → ForEach (batchCount 6)</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent"><span class="fn-eyebrow">Fan-out</span><strong>Execute Pipeline × 37</strong><span class="fn-body">One child per object, parameters passed, wait-on-completion = true</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node"><span class="fn-eyebrow">Aggregate</span><strong>If Condition</strong><span class="fn-body">Any child status = Failed → orchestrator fails as one alert, not 37</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node accent"><span class="fn-eyebrow">Downstream</span><strong>Mart load pipeline</strong><span class="fn-body">Triggered only after the orchestrator succeeds — never on a fixed clock offset</span></div>
+      </div>
+      <ul>
+        <li><strong>Concurrency throttling protects the source, not just ADF:</strong> <code class="inline">batchCount = 6</code> is set deliberately below what ADF could run in parallel — the ceiling is PAS's self-hosted IR gateway and the on-prem SQL Server's connection pool, not the platform.</li>
+        <li><strong>No polling for "is curated ready yet":</strong> the Synapse mart-load pipeline is wired as a downstream dependency on the orchestrator's success (an <code class="inline">Execute Pipeline</code> call at the end of the master pipeline, not a separately scheduled trigger guessing at a safe time gap) — the mart never reads a half-updated curated zone.</li>
+        <li><strong>Self-dependency on the hourly pipelines:</strong> the ClaimsIntake and Endorsement tumbling-window triggers use ADF's built-in tumbling-window dependency on their own previous window, so a run that goes long can never overlap with the next hour's run against the same watermark.</li>
+        <li><strong>One failure surface:</strong> whether a failure comes from the daily orchestrator, an hourly independent pipeline, or a chunked backfill, all three write to the same execution log (Standard logging, above) — on-call has one dashboard, not three.</li>
+      </ul>
+
+      <h3 id="impl-walkthrough">Built with ADF Forge — step by step</h3>
+      <ol>
+        <li><strong>Onboarding:</strong> Upload the 43-row object CSV (Upload → Map columns → Validate → Commit); 41 rows auto-map cleanly, 2 need a manual target-table correction flagged by validation.</li>
+        <li><strong>Connections:</strong> Create <em>PAS-SQLServer-OnPrem</em> (self-hosted IR, Windows auth, Key Vault secret reference for the service account), <em>PAS-FileShare-SFTP</em>, <em>Lake-ADLS</em>, <em>Mart-Synapse</em> — four connections cover all 43 objects.</li>
+        <li><strong>Build → Basics:</strong> Pipeline pattern = master/child for the daily batch (one orchestrator, 37 child pipelines); independent pattern for the two hourly tables and the near-real-time feed, so a single hot table's failure never blocks the daily orchestrator.</li>
+        <li><strong>Build → Source/Target:</strong> Pick the saved connections; source objects prefill from Onboarding; set watermark column(s) per table (up to 5 supported) for every Incremental object.</li>
+        <li><strong>Build → Pipeline Settings:</strong> Retry count 3 / 30s backoff, parallel copies 8 for the 210M-row ClaimsIntake table, Azure Monitor logging on, the 11 standard metadata columns attached; ClaimsIntake's one-time historical seed additionally sets Partition &amp; chunking (21 chunks, batchCount 5 — see <a href="#impl-chunking">High-volume load</a> above).</li>
+        <li><strong>Review &amp; Generate:</strong> One click produces the full artifact set — pipeline, datasets, linked services, triggers, parameters — as a new <code class="inline">DRAFT</code>.</li>
+        <li><strong>Validate:</strong> ADF schema checks + the project's Standards policy run automatically; a naming violation on 2 objects is caught here, before any human review.</li>
+        <li><strong>Push to Git → PR:</strong> Selected, <code class="inline">VALIDATED</code> artifacts push to <code class="inline">feature/pas-migration-batch-3</code>; a PR opens into <code class="inline">dev</code> with the project's default reviewers prefilled.</li>
+      </ol>
+
+      <h3 id="impl-cicd">CI/CD pipeline, stage by stage</h3>
+      <p>
+        This runs in the customer's own Azure DevOps/GitHub Actions project against the
+        <strong>same Git repository</strong> ADF Forge pushed the artifacts to — it is configured once
+        per project, not per pipeline, and every future PR rides the same train.
+      </p>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Stage</th><th>Trigger</th><th>What happens</th></tr></thead>
+          <tbody>
+            <tr><td><strong>1 · PR review</strong></td><td>PR opened against <code class="inline">dev</code></td><td>CI runs a lint/schema check on the changed JSON artifacts (the same checks Validate already ran) as a required PR status check; a human reviewer approves.</td></tr>
+            <tr><td><strong>2 · Build &amp; export</strong></td><td>Merge to <code class="inline">dev</code></td><td>ADF's own "Publish" export — run headless via <code class="inline">@microsoft/azure-data-factory-utilities</code> (<code class="inline">npm run build validate</code> then <code class="inline">npm run build export</code>) — turns the collaboration branch's raw JSON into a deployable ARM template + parameters file, published as a pipeline artifact.</td></tr>
+            <tr><td><strong>3 · Deploy Dev</strong></td><td>Automatic, on stage 2 success</td><td><code class="inline">azure/arm-deploy</code> applies the ARM template to the Dev Data Factory using the Dev parameters file (factory name, storage account, Key Vault references only — never a literal secret). A post-deployment script stops/restarts affected triggers and removes any dataset/pipeline dropped from source.</td></tr>
+            <tr><td><strong>4 · Smoke test</strong></td><td>Automatic, after Dev deploy</td><td>Triggers the 9 reference-table Full Load pipelines on demand and asserts rows_written &gt; 0 and status = SUCCEEDED in the execution log — a fast signal before promoting further.</td></tr>
+            <tr><td><strong>5 · Deploy Test</strong></td><td>Manual approval gate (QA sign-off)</td><td>Same ARM template artifact (never rebuilt) redeployed with Test parameters; QA runs the full 43-object load against a Test copy of PAS and reconciles row counts against the legacy job's last known-good run.</td></tr>
+            <tr><td><strong>6 · Deploy Prod</strong></td><td>Manual approval gate (change-advisory sign-off)</td><td>Same ARM template artifact redeployed with Prod parameters, during the agreed maintenance window; triggers stay paused until the parallel-run reconciliation below passes.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout callout-cicd">
+        <span class="callout-icon">✓</span>
+        <div>
+          <strong>One build, promoted everywhere</strong>
+          <p>The ARM template produced in stage 2 is deployed unchanged to Dev, Test, and Prod — only its parameters file changes per environment. This is what actually proves "what passed Test is what runs in Prod," rather than re-exporting per environment and hoping nothing drifted.</p>
+        </div>
+      </div>
+
+      <h3 id="impl-control-promotion">Promoting onboarded source &amp; control-table metadata</h3>
+      <p>
+        The ARM template in stage 2 only carries the ADF artifacts themselves — pipeline, dataset,
+        linked service, trigger JSON. It says nothing about <em>which of PAS's 43 tables are enabled,
+        their watermark column, or their target path</em> — that inventory lives in
+        <code class="inline">control.adf_control_table</code>, the table the generated pipeline's
+        <code class="inline">Lookup</code> activity reads at runtime to decide what to copy. Promoting
+        that metadata is a parallel, environment-scoped step riding the same PR and the same CI/CD run
+        as the ARM deploy above:
+      </p>
+      <ol>
+        <li><strong>Onboard or update the inventory in ADF Forge:</strong> <code class="inline">Onboarding</code>
+        registers/edits PAS's 43 tables — target, format, load behavior, watermark column — via CSV
+        import or the manual grid, then <strong>Generate control-table SQL</strong> produces
+        <code class="inline">&lt;sql&gt;/adf_control_table.sql</code> (DDL plus one seed
+        <code class="inline">INSERT</code> per enabled object) and an <code class="inline">objects.csv</code>
+        snapshot — committed to the same feature branch and PR as the pipeline artifacts, never
+        hand-typed against a live database.</li>
+        <li><strong>Reviewed alongside the pipeline diff (stage 1):</strong> a reviewer sees exactly
+        which control-table rows changed — a newly enabled object, an edited watermark column — next
+        to the pipeline JSON diff, so a metadata change gets the same scrutiny as a code change.</li>
+        <li><strong>Applied to Dev's control database (parallel to stage 3):</strong> a CI/CD step runs
+        <code class="inline">adf_control_table.sql</code> against the Dev control-table database —
+        connection resolved from Project Settings → Metadata &amp; parameters, credential from Key
+        Vault, never typed into ADF Forge or the script — with idempotent upserts so a re-run is always
+        safe.</li>
+        <li><strong>Proven by the same smoke test (stage 4):</strong> the 9 reference-table smoke run
+        succeeding confirms the ARM-deployed pipeline and the newly promoted control-table rows agree
+        — it's the table's <code class="inline">Enabled</code>/<code class="inline">WatermarkColumn</code>
+        values the Lookup activity actually reads at runtime.</li>
+        <li><strong>Promoted unchanged to Test, then Prod (stages 5–6):</strong> the identical
+        <code class="inline">adf_control_table.sql</code> artifact — never hand-edited or regenerated
+        per environment — is applied to Test's and Prod's own control databases under the same QA and
+        change-advisory sign-offs as the ARM deploy, so "what passed Test is what runs in Prod" holds
+        for the metadata driving the migration, not just the pipeline shape.</li>
+        <li><strong>Rollback:</strong> every <code class="inline">adf_control_table.sql</code> is
+        retained and versioned by the CI/CD run number, exactly like the ARM template — a bad
+        promotion (an object enabled too early, a wrong watermark seed) is fixed by re-applying the
+        previous run's SQL artifact, never by hand-editing rows in a live control table.</li>
+      </ol>
+
+      <h3 id="impl-cutover">Governance, cutover &amp; rollback</h3>
+      <ul>
+        <li><strong>Parallel run:</strong> New pipelines run alongside the legacy batch for 3 weeks; the execution log's <code class="inline">rows_written</code> per object is reconciled daily against the legacy job's row counts before any consumer is switched over.</li>
+        <li><strong>Governance enforced throughout:</strong> naming pattern <code class="inline">pl_pas_&lt;object&gt;_&lt;load&gt;</code> at <code class="inline">Block</code>, required tags (<code class="inline">data-domain</code>, <code class="inline">pii</code>, <code class="inline">source-system</code>) at <code class="inline">Block</code>, Key-Vault-only secrets (always on), base-branch-must-be-dev (always on).</li>
+        <li><strong>Rollback:</strong> redeploy the previous stage-2 ARM template artifact (every artifact is retained and versioned by the CI/CD run number) — never a manual edit against a live factory. A feature branch is reverted via a normal PR if the source of the regression is a bad artifact, not a bad deploy.</li>
+        <li><strong>Decommission:</strong> once reconciliation holds for 2 consecutive weeks and both partner feeds confirm parity, the legacy SSIS job is disabled (not deleted) for a further 30-day cooling-off period, then retired.</li>
+      </ul>
+    </section>
+
+    <p class="doc-footnote">
+      Reference implementation for Delivery → Sample Guides. Every screen, wizard step and lifecycle
+      state named above matches the ADF Forge product exactly as shipped — open the in-app
+      <em>User guide</em> (help icon) for the live version of this walkthrough.
+    </p>
+  </main>
+</div>
+</body>
+</html>

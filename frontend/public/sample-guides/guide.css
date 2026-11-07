@@ -1,0 +1,202 @@
+/* Shared stylesheet for the ADF Forge sample implementation guides.
+   Palette mirrors frontend/app/globals.css (warm neutral, indigo/"teal" accent) so
+   these standalone docs feel like part of the app when opened from Delivery > Sample Guides. */
+
+:root {
+  --ink: #1e1e24;
+  --ink-2: #3f3f47;
+  --muted: #6b6b74;
+  --faint: #9a9aa2;
+  --bg: #fbfbfc;
+  --surface: #ffffff;
+  --surface-2: #f7f7f9;
+  --surface-3: #f1f1f4;
+  --line: #e7e7ec;
+  --line-2: #f0f0f3;
+  --teal-50: #eef0ff;
+  --teal-100: #e0e1ff;
+  --teal: #5046e5;
+  --teal-600: #4a40d8;
+  --teal-700: #4038c4;
+  --amber-50: #fdf6e8;
+  --amber-600: #a16207;
+  --green-50: #eefaf3;
+  --green-700: #157347;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.65 -apple-system, "Segoe UI", Manrope, Inter, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.doc-shell {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 32px;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 28px 20px 80px;
+}
+
+@media (max-width: 860px) {
+  .doc-shell { grid-template-columns: 1fr; }
+  .doc-toc { position: static !important; order: 2; }
+}
+
+/* ---- Masthead ---- */
+.doc-masthead {
+  grid-column: 1 / -1;
+  border: 1px solid var(--line);
+  background: linear-gradient(135deg, var(--teal-50), var(--surface));
+  border-radius: var(--r-lg);
+  padding: 26px 28px;
+  margin-bottom: 4px;
+}
+.doc-eyebrow {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--teal-700);
+}
+.doc-masthead h1 {
+  margin: 8px 0 10px;
+  font-size: 28px;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.doc-sub { margin: 0 0 16px; max-width: 78ch; color: var(--ink-2); font-size: 14.5px; }
+.doc-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px solid var(--line); background: var(--surface);
+  border-radius: 999px; padding: 4px 10px;
+  font-size: 11.5px; font-weight: 700; color: var(--ink-2);
+}
+.pill.pill-teal { background: var(--teal-50); border-color: var(--teal-100); color: var(--teal-700); }
+.pill.pill-amber { background: var(--amber-50); border-color: #f3e3b8; color: var(--amber-600); }
+.pill.pill-green { background: var(--green-50); border-color: #cdece0; color: var(--green-700); }
+
+/* ---- TOC ---- */
+.doc-toc {
+  position: sticky; top: 20px; align-self: start;
+  border: 1px solid var(--line); background: var(--surface);
+  border-radius: var(--r-md); padding: 16px;
+  font-size: 12.5px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+.doc-toc .toc-title { font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); margin-bottom: 8px; }
+.doc-toc a {
+  display: block; padding: 5px 8px; margin: 1px 0;
+  border-radius: var(--r-sm); color: var(--ink-2); text-decoration: none; font-weight: 600;
+}
+.doc-toc a:hover { background: var(--surface-3); color: var(--ink); }
+.doc-toc a.sub { padding-left: 20px; font-weight: 500; color: var(--muted); font-size: 12px; }
+
+/* ---- Body ---- */
+.doc-body { min-width: 0; }
+.doc-section { border-top: 1px solid var(--line-2); padding: 30px 0 8px; }
+.doc-section:first-child { border-top: none; padding-top: 8px; }
+.doc-section h2 {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 20px; letter-spacing: -0.01em; margin: 0 0 6px;
+}
+.doc-section .step-num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 999px; flex: none;
+  background: var(--teal); color: #fff; font-size: 12px; font-weight: 800;
+}
+.doc-section h3 { font-size: 15px; margin: 22px 0 8px; color: var(--ink); }
+.doc-section h4 { font-size: 13px; margin: 16px 0 6px; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.04em; }
+.doc-section p { color: var(--ink-2); margin: 0 0 12px; max-width: 86ch; }
+.doc-section ul, .doc-section ol { margin: 0 0 14px; padding-left: 20px; color: var(--ink-2); }
+.doc-section li { margin: 4px 0; }
+.doc-lede { font-size: 15px; color: var(--ink-2); max-width: 82ch; }
+
+/* ---- Callouts ---- */
+.callout {
+  display: flex; gap: 12px;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); padding: 14px 16px; margin: 14px 0 18px;
+}
+.callout .callout-icon {
+  flex: none; width: 26px; height: 26px; border-radius: 8px;
+  display: grid; place-items: center; font-size: 14px;
+}
+.callout strong { display: block; font-size: 13px; color: var(--ink); margin-bottom: 3px; }
+.callout p, .callout span { font-size: 13px; color: var(--ink-2); margin: 0; }
+.callout-forge { background: var(--teal-50); border-color: var(--teal-100); }
+.callout-forge .callout-icon { background: var(--teal); color: #fff; }
+.callout-cicd { background: var(--green-50); border-color: #cdece0; }
+.callout-cicd .callout-icon { background: var(--green-700); color: #fff; }
+.callout-risk { background: var(--amber-50); border-color: #f3e3b8; }
+.callout-risk .callout-icon { background: var(--amber-600); color: #fff; }
+
+/* ---- Tables ---- */
+.doc-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r-md); margin: 10px 0 18px; }
+table.doc-table { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 560px; }
+table.doc-table th {
+  text-align: left; background: var(--surface-2); color: var(--faint);
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 9px 12px; border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+table.doc-table td { padding: 9px 12px; border-bottom: 1px solid var(--line-2); color: var(--ink-2); vertical-align: top; }
+table.doc-table tr:last-child td { border-bottom: none; }
+table.doc-table code { font-size: 11.5px; }
+
+/* ---- Code / tree blocks ---- */
+.doc-code {
+  background: var(--ink); color: #e7e7ff;
+  border-radius: var(--r-md); padding: 14px 16px; margin: 10px 0 18px;
+  font: 12px/1.7 "DM Mono", ui-monospace, Consolas, monospace;
+  overflow-x: auto; white-space: pre;
+}
+code.inline { background: var(--surface-3); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 12px; font-family: "DM Mono", ui-monospace, Consolas, monospace; }
+
+/* ---- Flow diagram (pure CSS, no images) ---- */
+.flow {
+  display: flex; flex-wrap: wrap; align-items: stretch; gap: 0;
+  margin: 14px 0 20px;
+}
+.flow-node {
+  border: 1px solid var(--line); background: var(--surface);
+  border-radius: var(--r-md); padding: 12px 14px; min-width: 140px;
+  flex: 1 1 140px;
+}
+.flow-node .fn-eyebrow { display: block; font-size: 9.5px; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint); margin-bottom: 3px; }
+.flow-node strong { display: block; font-size: 12.5px; color: var(--ink); margin-bottom: 3px; }
+.flow-node span.fn-body { font-size: 11.5px; color: var(--muted); }
+.flow-node.accent { background: var(--teal-50); border-color: var(--teal-100); }
+.flow-arrow { display: flex; align-items: center; justify-content: center; flex: 0 0 28px; color: var(--faint); font-size: 16px; }
+@media (max-width: 700px) {
+  .flow { flex-direction: column; }
+  .flow-arrow { transform: rotate(90deg); flex-basis: 20px; }
+}
+
+/* ---- Two/three column card grids ---- */
+.grid-cards { display: grid; gap: 12px; margin: 10px 0 18px; }
+.grid-cards.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid-cards.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 700px) { .grid-cards.cols-2, .grid-cards.cols-3 { grid-template-columns: 1fr; } }
+.mini-card { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); padding: 12px 14px; }
+.mini-card strong { display: block; font-size: 12.5px; color: var(--ink); margin-bottom: 4px; }
+.mini-card span { font-size: 11.5px; color: var(--muted); }
+
+/* ---- Cadence chips reused throughout the implementation tables ---- */
+.chip { display: inline-block; border-radius: 5px; padding: 1.5px 7px; font-size: 10.5px; font-weight: 700; white-space: nowrap; }
+.chip-daily { background: var(--surface-3); color: var(--ink-2); }
+.chip-hourly { background: var(--teal-50); color: var(--teal-700); }
+.chip-nrt { background: var(--amber-50); color: var(--amber-600); }
+.chip-full { background: var(--surface-3); color: var(--ink-2); }
+.chip-incr { background: var(--green-50); color: var(--green-700); }
+
+.doc-footnote { margin-top: 34px; padding-top: 16px; border-top: 1px solid var(--line-2); font-size: 11.5px; color: var(--faint); }
